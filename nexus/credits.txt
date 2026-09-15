@@ -1,0 +1,5 @@
+Horizon Forbidden West and Machine Strike belong to Guerrilla Games and Sony Interactive Entertainment. The background picture and window icon Strikers offers to download are images from the game, their copyright, and are not part of the download.
+
+The tunnel protocol Strikers speaks was designed by Eric Zhang for bore (MIT). Strikers carries its own implementation and none of bore's code.
+
+The programs are built on the .NET 10 runtime (Microsoft, MIT), Avalonia (MIT), MicroCom.Runtime (MIT), SkiaSharp and HarfBuzzSharp (Microsoft, MIT, with the notices of Skia, HarfBuzz, FreeType and their dependencies) and ANGLE (BSD-3-Clause). Every licence text is in THIRD-PARTY-NOTICES.txt inside the download.

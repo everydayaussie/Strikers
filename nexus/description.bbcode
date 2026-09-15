@@ -1,0 +1,64 @@
+Strikers lets two people play Machine Strike against each other over the internet, each inside their own copy of Horizon Forbidden West. You both start an ordinary Machine Strike match against the game's opponent, and Strikers makes that opponent play your friend's moves. You place your own machines and take your own turns. The only thing that happens by itself is the sending.
+
+[size=4][b]What you both need[/b][/size]
+[list]
+[*]Windows 10 or 11, and your own copy of Horizon Forbidden West Complete Edition on Steam. One copy each.
+[*]The same game build on both PCs. Strikers checks when you connect and says which of you is behind. Let Steam update that PC.
+[*]The same Strikers version on both PCs. Unzip the same download on both and this never comes up.
+[*]Machine Strike's Beginner's Tutorial finished, so the game gives you a challenge list.
+[*]Both saves standing at Chainscrape, at Salma's Machine Strike table.
+[*]Regular Challenge unlocked at Salma's table. Every match Strikers sets up is played on that entry, whatever board you pick. Salma's challenges unlock in a chain, so finish Easy, Medium and Hard first, or press Unlock challenges in Strikers' Settings with the challenge list closed, then open the list again. That lasts until the game restarts.
+[/list]
+Only Salma's Challenges work. The Tutorials cannot, because their opponent follows a script.
+
+[size=4][b]Install[/b][/size]
+[list]
+[*]Unzip Strikers.zip into a folder of your own, such as Documents or Downloads. Not the top of a drive, where other accounts on the PC can change files, because Strikers runs what sits beside it.
+[*]Run Strikers.exe. Nothing is installed and no game file is changed. Delete the folder to remove it.
+[*]The first run shows the Windows "unknown publisher" warning, because the download is not signed. Press More info, then Run anyway.
+[*]If Windows refuses live-probe.exe with an Application Control message, that is Smart App Control, and it has to be off for Strikers to work.
+[*]Your antivirus may flag live-probe.exe. It reads and writes the running game's memory, which is what a cheat does and what this needs to do to carry your moves. If you want to check the download first, the SHA-256 of the zip is on the file's page here. In PowerShell, [code](Get-FileHash Strikers.zip -Algorithm SHA256).Hash[/code] should match it.
+[/list]
+
+[size=4][b]Before you press anything[/b][/size]
+Both of you, in game: travel to Chainscrape, talk to Salma and choose Machine Strike, then go to Challenges. Stop with the list on screen. Do not enter a challenge yet.
+
+[size=4][b]Play[/b][/size]
+Both of you run Strikers.exe. One of you hosts.
+[list=1]
+[*][b]Host:[/b] under Host, pick the board, the points to win, the max army cost and who goes first, then press Create lobby. After a few seconds an invite appears, hidden behind asterisks. Press Copy and send it to your opponent privately. Whoever has the invite can take the seat.
+[*][b]Joiner:[/b] under Join, press Paste, then Join. The board, the points and the cost arrive with the invite.
+[*][b]Both:[/b] choose your army. Build one in the Armies panel first, because the panel is out of reach once a match is under way. The host picks first. The joiner can also pick Opponent's army for a mirror match. Press Use this army.
+[*][b]Both:[/b] a safety code appears in groups of four. Read the amber group to your opponent and type the four they read to you into the box under the code (it says Their first four on the host's PC and Their last four on the other). Press Codes match, continue when it lights. If the codes differ, or no code appears, stop and start again. The code is safe to say aloud. The invite is the one thing to keep private.
+[*][b]Both:[/b] with the game still on the challenge list, press Set up the match. Strikers writes for about half a minute.
+[*][b]Both:[/b] wait for the green line You are both ready. Enter the challenge now. Entering early lets the game's opponent take a free turn, and the two boards then disagree. You have ten minutes from that line.
+[*][b]Both:[/b] enter the challenge Strikers named and place your machines in your own rows, taking turns square by square. Do not back out of the challenge list on the way in.
+[*][b]Play.[/b] Take your turn and end it. It sends itself. Your opponent's turn plays out as the game's opponent, with the game's own animation. Nothing in Strikers needs pressing again.
+[/list]
+When the match ends, press Continue in the game, then Stop in Strikers. To play again, set the match up from the start. The host's Strikers window has to stay open for the whole match, because closing it ends the match for both of you.
+
+[size=4][b]If something goes wrong[/b][/size]
+When a match stops, Strikers writes a report zip into the reports folder beside Strikers.exe and says so on screen. Settings has a Save report button for any other time. Send that zip from both PCs when asking for help: open an issue at the source link at the end of this page and attach it.
+[list]
+[*][b]Stopped: the two games disagree.[/b] Strikers could not follow the last turn and stopped both PCs on purpose. Press Stop and start a new match.
+[*][b]Stopped: you left the match[/b] or [b]your opponent left the match.[/b] One of you pressed Stop or closed Strikers. Start again with a fresh invite.
+[*][b]You and the other player have different versions of Strikers.[/b] The message says which of you is behind. That player downloads the newest zip and unzips it over their folder.
+[*][b]The invite does not read.[/b] Paste the whole line: an address with a port, a long room id and a six character code.
+[*][b]Could not reach your opponent[/b] after Join. The host's window is closed, or the invite is from an earlier Create lobby. Ask for a fresh invite.
+[*][b]Lost the connection.[/b] The link dropped. Strikers keeps trying for a moment. If it does not come back, press Stop on both PCs and start again.
+[*][b]The game is still in a match, or on its victory screen.[/b] Press Continue in the game, stand on the challenge list, and press Set up the match again.
+[*][b]Another Strikers is running a match.[/b] Only one match at a time on a PC. Use that window, or press Stop in it first.
+[/list]
+
+[size=4][b]What Strikers does on your PC[/b][/size]
+[list]
+[*]It never plays for you.
+[*]It changes no game file and installs nothing. While a match runs it reads and writes the running game's memory from outside, and changes a few places in the game's code so the AI plays your opponent's moves. It puts them back when the match ends, and closing the game clears the rest. Nothing is left on disk.
+[*]Your home address is never given to the other player. The two PCs connect through the public tunnel at bore.pub, and everything inside the tunnel is encrypted between the two of you. The safety code is what proves that. If your PC cannot look up bore.pub, Strikers asks 1.1.1.1 or 8.8.8.8 over HTTPS.
+[*]It offers to download a background picture and a window icon, images from the game, from files.catbox.moe. Say no and it looks plain.
+[*]It asks Nexus Mods for the newest version each time it opens and sends nothing about you or your games.
+[/list]
+This is a single-player game modified privately by the people who own it. Do not expect help from the game's publisher.
+
+
+Source code and issues: [url=https://github.com/everydayaussie/Strikers]https://github.com/everydayaussie/Strikers[/url]

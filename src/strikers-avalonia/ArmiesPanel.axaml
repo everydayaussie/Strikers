@@ -1,0 +1,64 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Strikers.App.ArmiesPanel">
+
+  <Grid Name="PanelRoot" Margin="18,10,18,16" RowDefinitions="Auto,Auto,*,Auto,Auto,Auto">
+    <ScrollViewer Name="TableScroll" Grid.Row="0" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+      <Grid RowDefinitions="Auto,Auto">
+        <Grid Name="Header" Grid.Row="0" Margin="0,0,0,4" />
+        <ScrollViewer Name="RowsScroll" Grid.Row="1" HorizontalScrollBarVisibility="Disabled"
+                      VerticalAlignment="Top">
+          <StackPanel Name="Rows" />
+        </ScrollViewer>
+      </Grid>
+    </ScrollViewer>
+
+    <Grid Name="NewArmyGrid" Grid.Row="3" Margin="0,28,0,0" RowDefinitions="Auto,Auto,Auto,Auto">
+      <TextBlock Name="ArmyHeading" Grid.Row="0" IsVisible="False" />
+
+      <Grid Name="PickedHeader" Grid.Row="1" Margin="0,6,0,0" />
+
+      <ScrollViewer Name="PickedScroll" Grid.Row="2" Margin="0,4,0,0"
+                    HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Name="Picked" />
+      </ScrollViewer>
+
+      <Border Grid.Row="3" Classes="controlBar" Margin="0,10,0,0">
+        <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBox Name="ArmyNameBox" FontSize="13" PlaceholderText="Army name"
+                   VerticalAlignment="Center">
+            <TextBox.InnerRightContent>
+              <Button Name="SaveArmyButton" Classes="inlineAction" Content="Save" />
+            </TextBox.InnerRightContent>
+          </TextBox>
+          <Border Classes="optionDivider" />
+          <Button Name="ClearArmyButton" Classes="glass" VerticalAlignment="Center" />
+          <Border Classes="optionDivider" />
+          <TextBox Name="ImportArmyBox" FontSize="13" PlaceholderText="Paste army"
+                   MaxLength="64" VerticalAlignment="Center">
+            <TextBox.InnerRightContent>
+              <Button Name="ImportArmyButton" Classes="inlineAction" Content="Import" />
+            </TextBox.InnerRightContent>
+          </TextBox>
+        </WrapPanel>
+      </Border>
+
+    </Grid>
+
+    <Grid Name="SavedGrid" Grid.Row="4" Margin="0,26,0,0" RowDefinitions="Auto,Auto,Auto">
+      <TextBlock Name="SavedHeading" Grid.Row="0" Text="Saved armies" Classes="sectionHeading" />
+
+      <Border Name="SavedHeaderRule" Classes="shelfHeader" Grid.Row="1" Margin="0,6,0,0">
+        <Grid Name="SavedHeader" />
+      </Border>
+
+      <ScrollViewer Name="SavedScroll" Grid.Row="2" Margin="0,2,0,0"
+                    HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Name="SavedList" VerticalAlignment="Top" />
+      </ScrollViewer>
+    </Grid>
+
+    <TextBlock Name="ArmiesStatus" Grid.Row="5" FontSize="13" TextWrapping="Wrap" IsVisible="False" />
+  </Grid>
+
+</UserControl>

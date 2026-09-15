@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Strikers</AssemblyName>
+    <RootNamespace>Strikers.App</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <StrikersVersion>1.0.0</StrikersVersion>
+    <NexusModId>209</NexusModId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="StrikersVersion" Value="$(StrikersVersion)" />
+    <AssemblyMetadata Include="NexusModId" Value="$(NexusModId)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(StrikersCommit)' != ''">
+    <AssemblyMetadata Include="StrikersCommit" Value="$(StrikersCommit)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TestBuildFor)' != ''">
+    <AssemblyMetadata Include="TestBuildFor" Value="$(TestBuildFor)" />
+    <AssemblyMetadata Include="TestBuildExpires" Value="$(TestBuildExpires)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\strikers-core\strikers-core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Strikers.Core" />
+  </ItemGroup>
+
+  <Target Name="DropNativeSymbols" AfterTargets="Publish">
+    <ItemGroup>
+      <NativeSymbols Include="$(PublishDir)**\*.pdb" />
+    </ItemGroup>
+    <Delete Files="@(NativeSymbols)" />
+  </Target>
+
+</Project>

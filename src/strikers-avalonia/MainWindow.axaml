@@ -1,0 +1,471 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:Strikers.App"
+        x:Class="Strikers.App.MainWindow"
+        Title="Strikers"
+        Width="1100" Height="720"
+        MinWidth="1080" MinHeight="600"
+        WindowStartupLocation="CenterScreen"
+        WindowState="Maximized"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaTitleBarHeightHint="-1">
+
+  <Window.Styles>
+    <Style Selector="Button.caption">
+      <Setter Property="Width" Value="46" />
+      <Setter Property="Height" Value="46" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets" />
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Button.caption:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#26FFFFFF" />
+    </Style>
+
+    <Style Selector="Button.caption:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="#40FFFFFF" />
+    </Style>
+
+    <Style Selector="Button.caption.close:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#C42B1C" />
+    </Style>
+
+    <Style Selector="Button.caption.close:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="#B0231A" />
+    </Style>
+
+    <Style Selector="Border.panel">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Margin" Value="6" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="BoxShadow" Value="0 6 20 0 #59000000" />
+    </Style>
+
+    <Style Selector="Image.frost">
+      <Setter Property="Stretch" Value="Fill" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+    </Style>
+
+    <Style Selector="TextBlock.panelHeader">
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LetterSpacing" Value="2" />
+      <Setter Property="Margin" Value="18,14,18,0" />
+    </Style>
+
+    <Style Selector="Border.headerRule">
+      <Setter Property="Height" Value="2" />
+      <Setter Property="Width" Value="26" />
+      <Setter Property="CornerRadius" Value="1" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="Margin" Value="18,6,0,0" />
+    </Style>
+
+    <Style Selector="Border.wake">
+      <Setter Property="Background" Value="#FFFFFF" />
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.15" />
+        </Transitions>
+      </Setter>
+    </Style>
+
+    <Style Selector="Border.panel:pointerover Border.wake">
+      <Setter Property="Opacity" Value="0.05" />
+    </Style>
+
+    <Style Selector="Border.catchlight">
+      <Setter Property="Height" Value="1" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+      <Setter Property="Margin" Value="8,1,8,0" />
+      <Setter Property="Background" Value="#0FFFFFFF" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+    </Style>
+
+    <Style Selector="Button.glass">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#26FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Padding" Value="12,5" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Button.inlineAction">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="3" />
+      <Setter Property="Padding" Value="10,3" />
+      <Setter Property="Margin" Value="4,0,3,0" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="Button.inlineAction /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Button.inlineAction:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#26FFFFFF" />
+    </Style>
+
+    <Style Selector="Button.inlineAction:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="#33FFFFFF" />
+    </Style>
+
+    <Style Selector="Button.glass:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#26FFFFFF" />
+    </Style>
+
+    <Style Selector="Button.glass:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="#3DFFFFFF" />
+    </Style>
+
+    <Style Selector="ToggleButton.glass">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#26FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Padding" Value="12,5" />
+    </Style>
+
+    <Style Selector="ToggleButton.glass:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#26FFFFFF" />
+    </Style>
+
+    <Style Selector="ToggleButton.glass:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="#3DFFFFFF" />
+    </Style>
+
+    <Style Selector="ToggleButton.glass:checked /template/ ContentPresenter">
+      <Setter Property="Background" Value="#33FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="Foreground" Value="#E6E8EA" />
+    </Style>
+
+    <Style Selector="ToggleButton.glass:checked:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#40FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="Foreground" Value="#E6E8EA" />
+    </Style>
+
+    <Style Selector="StackPanel.compact Border#HostHead">
+      <Setter Property="IsVisible" Value="False" />
+    </Style>
+
+    <Style Selector="Button.action">
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="MinWidth" Value="150" />
+      <Setter Property="Padding" Value="18,6" />
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Button.action.primary">
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+    </Style>
+
+    <Style Selector="TextBlock.sectionHeading">
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <Style Selector="Border.stageBar">
+      <Setter Property="Height" Value="3" />
+      <Setter Property="CornerRadius" Value="1.5" />
+      <Setter Property="Background" Value="#26FFFFFF" />
+      <Setter Property="Margin" Value="2,0" />
+    </Style>
+
+    <Style Selector="Border.stageBar.lit">
+      <Setter Property="Background" Value="#E8B36A" />
+    </Style>
+
+    <Style Selector="TextBlock.stageLabel">
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="Foreground" Value="#AEB4BB" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="Margin" Value="0,3,0,0" />
+    </Style>
+
+    <Style Selector="TextBlock.stageLabel.lit">
+      <Setter Property="Foreground" Value="#E6E8EA" />
+    </Style>
+
+    <Style Selector="Border.syncDot">
+      <Setter Property="Width" Value="8" />
+      <Setter Property="Height" Value="8" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Background" Value="#33AEB4BB" />
+    </Style>
+
+    <Style Selector="Border.syncDot.on">
+      <Setter Property="Background" Value="#8FC46A" />
+    </Style>
+
+    <Style Selector="Border.hintDot">
+      <Setter Property="Width" Value="18" />
+      <Setter Property="Height" Value="18" />
+      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="Background" Value="#1AFFFFFF" />
+      <Setter Property="BorderBrush" Value="#66FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+
+    <Style Selector="Border.controlBar">
+      <Setter Property="Padding" Value="14,6" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Border.optionDivider">
+      <Setter Property="Width" Value="1" />
+      <Setter Property="Height" Value="22" />
+      <Setter Property="Background" Value="#33AEB4BB" />
+      <Setter Property="Margin" Value="10,0,10,0" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="ComboBox">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="4" />
+    </Style>
+
+    <Style Selector="TextBox">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="4" />
+    </Style>
+
+    <Style Selector="TextBox:pointerover /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="TextBox:focus-within /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+
+    <Style Selector="NumericUpDown">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="#B3FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="4" />
+    </Style>
+
+    <Style Selector="ScrollBar[IsExpanded=true] /template/ Grid#Root">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="ScrollBar[IsExpanded=true] /template/ Rectangle#TrackRect">
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="ScrollBar:vertical[IsExpanded=true] /template/ Thumb">
+      <Setter Property="RenderTransform" Value="{DynamicResource VerticalSmallScrollThumbScaleTransform}" />
+    </Style>
+    <Style Selector="ScrollBar:horizontal[IsExpanded=true] /template/ Thumb">
+      <Setter Property="RenderTransform" Value="{DynamicResource HorizontalSmallScrollThumbScaleTransform}" />
+    </Style>
+    <Style Selector="ScrollBar[IsExpanded=true] /template/ RepeatButton">
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+
+    <Style Selector="Border.row">
+      <Setter Property="Padding" Value="0,3" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="#14FFFFFF" />
+      <Setter Property="BorderThickness" Value="0,0,0,1" />
+    </Style>
+
+    <Style Selector="Border.row:pointerover">
+      <Setter Property="Background" Value="#14FFFFFF" />
+    </Style>
+
+    <Style Selector="Border.slot">
+      <Setter Property="BorderBrush" Value="#10FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="3" />
+      <Setter Property="Padding" Value="0,3" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+
+    <Style Selector="Border.shelfHeader">
+      <Setter Property="BorderBrush" Value="#14FFFFFF" />
+      <Setter Property="BorderThickness" Value="0,0,0,1" />
+      <Setter Property="Padding" Value="0,0,0,3" />
+    </Style>
+
+    <Style Selector="Border.formRule">
+      <Setter Property="BorderBrush" Value="#14FFFFFF" />
+      <Setter Property="BorderThickness" Value="0,0,0,1" />
+    </Style>
+
+    <Style Selector="Border.headerCell">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Padding" Value="0,2" />
+    </Style>
+
+    <Style Selector="Border.headerCell:pointerover">
+      <Setter Property="Background" Value="#14FFFFFF" />
+    </Style>
+
+    <Style Selector="Button.cog">
+      <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets" />
+      <Setter Property="FontSize" Value="14" />
+    </Style>
+
+    <Style Selector="Button.tool">
+      <Setter Property="Width" Value="156" />
+    </Style>
+
+    <Style Selector="Arc.spinner">
+      <Style.Animations>
+        <Animation Duration="0:0:1" IterationCount="INFINITE">
+          <KeyFrame Cue="0%">
+            <Setter Property="RotateTransform.Angle" Value="0" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="RotateTransform.Angle" Value="360" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+  </Window.Styles>
+
+  <Panel Name="Root">
+    <Image Name="Backdrop" Stretch="UniformToFill" />
+
+    <Border Name="Vignette" IsHitTestVisible="False" />
+
+    <Grid Name="Home"
+          Margin="26,60,26,26"
+          ColumnDefinitions="2.5*,4.5*,3*">
+
+      <Grid Grid.Column="0" RowDefinitions="Auto,Auto">
+        <Border Name="PlayPanel" Classes="panel" Grid.Row="0">
+          <Panel>
+            <Canvas><Image Name="PlayFrost" Classes="frost" /></Canvas>
+            <Border Classes="wake" />
+            <Grid Name="PlayTint" RowDefinitions="Auto,*">
+              <StackPanel Grid.Row="0">
+                <TextBlock Name="PlayHeader" Classes="panelHeader" Text="PLAY" />
+                <Border Name="PlayRule" Classes="headerRule" />
+              </StackPanel>
+              <local:PlayPanel Name="PlayFlow" Grid.Row="1" />
+            </Grid>
+            <Border Classes="catchlight" />
+          </Panel>
+        </Border>
+
+        <Border Name="SettingsPanel" Classes="panel" Grid.Row="1">
+          <Panel>
+            <Canvas><Image Name="SettingsFrost" Classes="frost" /></Canvas>
+            <Border Classes="wake" />
+            <Grid Name="SettingsTint" RowDefinitions="Auto,*">
+              <StackPanel Grid.Row="0">
+                <TextBlock Name="SettingsHeader" Classes="panelHeader" Text="SETTINGS" />
+                <Border Name="SettingsRule" Classes="headerRule" />
+              </StackPanel>
+              <local:SettingsPanel Name="Tools" Grid.Row="1" />
+            </Grid>
+            <Border Classes="catchlight" />
+          </Panel>
+        </Border>
+      </Grid>
+
+      <Border Name="BoardsPanel" Classes="panel" Grid.Column="1">
+        <Panel>
+          <Canvas><Image Name="BoardsFrost" Classes="frost" /></Canvas>
+            <Border Classes="wake" />
+          <Grid Name="BoardsTint" RowDefinitions="Auto,*">
+            <StackPanel Grid.Row="0">
+              <TextBlock Name="BoardsHeader" Classes="panelHeader" Text="BOARDS" />
+              <Border Name="BoardsRule" Classes="headerRule" />
+            </StackPanel>
+            <local:BoardsPanel Name="BoardEditor" Grid.Row="1" />
+          </Grid>
+          <Border Classes="catchlight" />
+        </Panel>
+      </Border>
+
+      <Border Name="ArmiesPanel" Classes="panel" Grid.Column="2">
+        <Panel>
+          <Canvas><Image Name="ArmiesFrost" Classes="frost" /></Canvas>
+            <Border Classes="wake" />
+          <Grid Name="ArmiesTint" RowDefinitions="Auto,*">
+            <StackPanel Grid.Row="0">
+              <TextBlock Name="ArmiesHeader" Classes="panelHeader" Text="ARMIES" />
+              <Border Name="ArmiesRule" Classes="headerRule" />
+            </StackPanel>
+            <local:ArmiesPanel Name="ArmyBuilder" Grid.Row="1" />
+          </Grid>
+          <Border Classes="catchlight" />
+        </Panel>
+      </Border>
+    </Grid>
+
+    <Border Name="CaptionScrim"
+            Height="46"
+            VerticalAlignment="Top"
+            IsHitTestVisible="False" />
+
+    <Border Name="DragStrip"
+            Height="46"
+            VerticalAlignment="Top"
+            Background="Transparent">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Name="WordMark"
+                   Grid.Column="0"
+                   Text="STRIKERS"
+                   VerticalAlignment="Center"
+                   Margin="20,0,0,0"
+                   FontSize="12"
+                   FontWeight="SemiBold"
+                   LetterSpacing="3" />
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+          <Button Name="SettingsCog" Classes="caption cog" Content="&#xE713;" />
+          <Button Name="MinButton" Classes="caption" Content="&#xE921;" />
+          <Button Name="MaxButton" Classes="caption" Content="&#xE922;" />
+          <Button Name="CloseButton" Classes="caption close" Content="&#xE8BB;" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Border Name="Hint"
+            IsVisible="False"
+            HorizontalAlignment="Center" VerticalAlignment="Center"
+            CornerRadius="6" Padding="22,18" MaxWidth="620">
+      <StackPanel Spacing="8">
+        <TextBlock Name="HintTitle" FontSize="16" FontWeight="SemiBold" />
+        <TextBlock Name="HintBody" FontSize="13" TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
+    <local:ToastRail Margin="0,52,20,0" />
+  </Panel>
+
+</Window>

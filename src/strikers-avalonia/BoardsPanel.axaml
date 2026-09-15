@@ -1,0 +1,63 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="using:Strikers.App"
+             x:Class="Strikers.App.BoardsPanel">
+
+  <Grid RowDefinitions="Auto,Auto,*,Auto,*,Auto,Auto" Margin="14,10,14,14">
+    <Border Name="ShapeBar" Grid.Row="0" Classes="controlBar" Margin="0,0,0,6">
+      <WrapPanel Name="ShapeRow" HorizontalAlignment="Center">
+        <CheckBox Name="MirrorBox" Content="Mirror" IsChecked="False"
+                  VerticalAlignment="Center" />
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Classes="optionDivider" />
+          <TextBlock Name="SizeLabel" Text="Board size" FontSize="13" VerticalAlignment="Center" Margin="0,0,8,0" />
+          <ComboBox Name="WidthBox" FontSize="13" VerticalAlignment="Center" />
+          <TextBlock Name="ByLabel" Text="by" FontSize="13" VerticalAlignment="Center" Margin="8,0" />
+          <ComboBox Name="HeightBox" FontSize="13" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Classes="optionDivider" />
+          <TextBlock Name="DepthLabel" Text="Placing rows" FontSize="13" VerticalAlignment="Center" Margin="0,0,8,0" />
+          <ComboBox Name="DepthBox" FontSize="13" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Classes="optionDivider" />
+          <Button Name="RandomButton" Classes="glass" Content="Random" VerticalAlignment="Center" Margin="0,0,10,0" />
+          <CheckBox Name="RandomSizeBox" Content="Random size" VerticalAlignment="Center" />
+        </StackPanel>
+      </WrapPanel>
+    </Border>
+    <Border Name="SwatchBar" Grid.Row="1" Classes="controlBar" Margin="0,0,0,10">
+      <WrapPanel Name="Swatches" HorizontalAlignment="Center" />
+    </Border>
+    <local:BoardView Name="View" Grid.Row="3" HorizontalAlignment="Center"
+                     ClipToBounds="True" />
+    <Border Name="KeepBar" Grid.Row="5" Classes="controlBar" Margin="0,10,0,12">
+      <WrapPanel Name="KeepRow" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Left">
+        <TextBox Name="NameBox" PlaceholderText="Board name" FontSize="13" VerticalAlignment="Center">
+          <TextBox.InnerRightContent>
+            <Button Name="SaveButton" Classes="inlineAction" Content="Save" />
+          </TextBox.InnerRightContent>
+        </TextBox>
+        <Border Classes="optionDivider" />
+        <Button Name="ResetButton" Classes="glass" VerticalAlignment="Center" />
+        <Border Classes="optionDivider" />
+        <TextBox Name="ImportBox" PlaceholderText="Paste board" FontSize="13" VerticalAlignment="Center">
+          <TextBox.InnerRightContent>
+            <Button Name="ImportButton" Classes="inlineAction" Content="Import" />
+          </TextBox.InnerRightContent>
+        </TextBox>
+      </WrapPanel>
+    </Border>
+    <StackPanel Name="SavedSection" Grid.Row="6" VerticalAlignment="Bottom" Margin="0,14,0,0" IsVisible="False">
+      <TextBlock Name="SavedHeading" Text="Saved boards" Classes="sectionHeading" Margin="0,0,0,6" />
+
+      <Border Classes="shelfHeader" Margin="0,0,0,4">
+        <Grid Name="SavedHeader" />
+      </Border>
+      <ScrollViewer Name="SavedScroll" HorizontalScrollBarVisibility="Disabled">
+        <UniformGrid Name="SavedRows" Columns="2" VerticalAlignment="Top" />
+      </ScrollViewer>
+    </StackPanel>
+  </Grid>
+</UserControl>

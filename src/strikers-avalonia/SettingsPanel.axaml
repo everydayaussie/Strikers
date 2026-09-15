@@ -1,0 +1,58 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Strikers.App.SettingsPanel">
+
+  <ScrollViewer Name="Scroll" HorizontalScrollBarVisibility="Disabled">
+    <Grid Name="Spread" Margin="18,10,18,16" RowDefinitions="Auto,*,Auto">
+
+      <StackPanel Grid.Row="0" Spacing="8">
+        <Grid ColumnDefinitions="Auto,*" Margin="0,2,0,0">
+          <Border Grid.ColumnSpan="2" Classes="formRule" />
+          <TextBlock Name="NameLabel" FontSize="13" Text="Name" VerticalAlignment="Center"
+                     Margin="0,0,12,0" />
+          <TextBox Name="NameBox" Grid.Column="1" FontSize="13" PlaceholderText="Your name"
+                   HorizontalAlignment="Left" Margin="0,6,0,6">
+            <TextBox.InnerRightContent>
+              <Button Name="SaveNameButton" Classes="inlineAction" Content="Save" />
+            </TextBox.InnerRightContent>
+          </TextBox>
+        </Grid>
+        <TextBlock Name="NameHeading" FontSize="12" TextWrapping="Wrap"
+                   Text="Shown on the board in game, to you and your opponent." />
+        <TextBlock Name="StatusLine" FontSize="13" />
+
+        <Border Classes="shelfHeader" Margin="0,14,0,0">
+          <TextBlock Classes="sectionHeading" Text="Tools" />
+        </Border>
+
+        <StackPanel Spacing="6" Margin="0,4,0,0">
+          <WrapPanel Name="ToolRow" Orientation="Horizontal" Margin="0,0,0,-6">
+            <Button Name="LogFolderButton" Classes="glass tool" Content="Open Strikers folder"
+                    Margin="0,0,8,6" />
+            <Button Name="ReportButton" Classes="glass tool" Content="Save report"
+                    Margin="0,0,8,6" />
+            <Button Name="UnlockButton" Classes="glass tool" Content="Unlock challenges"
+                    Margin="0,0,8,6" />
+            <Button Name="RandomBoardButton" Classes="glass tool" Content="Random board"
+                    Margin="0,0,8,6" />
+            <Button Name="RandomArmyButton" Classes="glass tool" Content="Random army"
+                    Margin="0,0,8,6" />
+            <Button Name="BackdropButton" Classes="glass tool" Content="Download pictures"
+                    Margin="0,0,8,6" IsVisible="False" />
+          </WrapPanel>
+        </StackPanel>
+      </StackPanel>
+
+      <StackPanel Grid.Row="2" Spacing="8" Margin="0,20,0,0">
+        <Grid Name="VersionsGrid" ColumnDefinitions="Auto,*" />
+
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <Button Name="CheckAgainButton" Classes="glass" Content="Refresh" />
+          <Button Name="CopyVersionsButton" Classes="glass" Content="Copy" />
+        </StackPanel>
+      </StackPanel>
+
+    </Grid>
+  </ScrollViewer>
+
+</UserControl>

@@ -1,0 +1,1 @@
+Online multiplayer mod for Machine Strike inside Horizon Forbidden West, by replacing the AI's move with another player's inputs

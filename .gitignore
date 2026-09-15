@@ -1,0 +1,8 @@
+bin/
+obj/
+out/
+.vs/
+.vscode/
+.idea/
+*.user
+src/strikers-avalonia/Assets/backdrop*

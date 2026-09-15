@@ -1,0 +1,46 @@
+Every field of the Nexus Mods page that is not free text, one line each, so the page can be rebuilt from this folder.
+
+General
+  Mod name: Strikers - Multiplayer Machine Strike Mod
+  Game: Horizon Forbidden West
+  Category: Miscellaneous
+  Mod version: the version being released, the same number as StrikersVersion in src/strikers-avalonia/strikers-avalonia.csproj
+  Author or team name: the account this repository is under
+  Short description: short-description.txt
+  Full description: description.bbcode, pasted in the editor's source view, its last line being the source link
+  Language: Any
+  Translation of another mod: no
+  Tags: tags.txt
+  Team access: nobody
+  Comments: allowed
+  Discussions: off
+  Bug tracker: Public (open)
+  Donation button: off
+  Donation message: off
+  Community tagging: off
+  Download mirrors: none
+
+Media
+  Header: media/header.png (1300x372)
+  Images: media/gallery-1.png and up (1920x1080), in that order
+  Videos: none
+  User submitted images: allowed, approved manually
+  User submitted videos: allowed, approved manually
+
+Files
+  One main file
+  File name: Strikers
+  Version: the same number as the mod version
+  Category: Main Files
+  File: Strikers.zip from build.ps1, run in a fresh clone of the source at the release tag
+  File description: the CHANGELOG.md section for this version, then one line, SHA-256 of Strikers.zip: followed by the value in the .sha256 file beside the zip
+  Changelog: the same CHANGELOG.md section
+
+Requirements
+  Requirement setting method: file-to-file
+  Requirements: none
+
+Permissions
+  Does your mod include content created by others: yes
+  Credits: credits.txt
+  Permission settings: Write your own (custom), the text in permissions.txt
