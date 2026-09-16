@@ -9,7 +9,7 @@ under a banner naming the package version and the SHA-256 of the file it came
 from.
 
   Component                       Shipped in                                 Licence
-  1. .NET runtime 10.0.11         Strikers.exe, netplay.exe, live-probe.exe  MIT, plus the notices in section 1
+  1. .NET runtime 10.0.12         Strikers.exe, netplay.exe, live-probe.exe  MIT, plus the notices in section 1
   2. Avalonia 12.1.1              Strikers.exe                               MIT
   3. MicroCom.Runtime 0.11.6      Strikers.exe                               MIT
   4. SkiaSharp 3.119.4 (Skia)     Strikers.exe, libSkiaSharp.dll             MIT, plus the notices in section 4

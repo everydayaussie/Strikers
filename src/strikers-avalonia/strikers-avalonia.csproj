@@ -3,6 +3,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <RuntimeFrameworkVersion Condition="'$(SelfContained)' == 'true'">10.0.12</RuntimeFrameworkVersion>
     <AssemblyName>Strikers</AssemblyName>
     <RootNamespace>Strikers.App</RootNamespace>
     <Nullable>enable</Nullable>
