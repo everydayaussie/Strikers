@@ -316,12 +316,7 @@ internal static partial class Program
                 return 2;
             }
 
-            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(found,
-                new System.Text.Json.JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-                }));
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(found, DumpJson.Default.Preset));
             return 0;
         }
 

@@ -108,7 +108,7 @@ public static class SnapshotJson
         error = "";
 
         SnapshotDto? dto;
-        try { dto = JsonSerializer.Deserialize<SnapshotDto>(json, Protocol.Json); }
+        try { dto = JsonSerializer.Deserialize(json, WireJson.Default.SnapshotDto); }
         catch (Exception ex) when (ex is JsonException or ArgumentException)
         { error = $"not valid snapshot JSON: {ex.Message}"; return false; }
 

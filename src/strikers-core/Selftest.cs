@@ -871,18 +871,21 @@ public static class Selftest
                   NetplayTool.StopDraftGuard() && guard.WaitOne(0));
         }
 
-        var oldFile = System.Text.Json.JsonSerializer.Deserialize<Settings>(
+        var oldFile = System.Text.Json.JsonSerializer.Deserialize(
                           "{\"name\":\"ALOY\",\"grain\":false,\"vignette\":false,\"frost\":false,"
                           + "\"wake\":false,\"legible\":false,\"parallax\":false,\"shuffle\":true,"
-                          + "\"log\":true}")
+                          + "\"log\":true}",
+                          StoreJson.Default.Settings)
                           ?? new Settings();
         Check("a settings file carrying the removed switches still reads",
               oldFile.Name == "ALOY");
 
         Check("a settings file with no offer key still offers the backdrop", oldFile.OfferBackdrop);
 
-        var offerOff = System.Text.Json.JsonSerializer.Deserialize<Settings>(
-            System.Text.Json.JsonSerializer.Serialize(new Settings { OfferBackdrop = false }));
+        var offerOff = System.Text.Json.JsonSerializer.Deserialize(
+            System.Text.Json.JsonSerializer.Serialize(
+                new Settings { OfferBackdrop = false }, StoreJson.Default.Settings),
+            StoreJson.Default.Settings);
         Check("never show again survives the round trip", offerOff is { OfferBackdrop: false });
 
         var sample = new byte[64];
@@ -1047,8 +1050,9 @@ public static class Selftest
         Check("the stored cap leaves room for the longest copy label the army cap allows",
               Army.MaxStoredName >= Army.MaxName + $" copy {ArmyStore.MaxArmies}".Length);
 
-        var mangled = ArmyStore.Normalise(System.Text.Json.JsonSerializer.Deserialize<List<Army>>(
-            "[null, {\"name\": null, \"machines\": [\"AB\", null, \"\"]}, {\"machines\": [\"CD\"]}]"));
+        var mangled = ArmyStore.Normalise(System.Text.Json.JsonSerializer.Deserialize(
+            "[null, {\"name\": null, \"machines\": [\"AB\", null, \"\"]}, {\"machines\": [\"CD\"]}]",
+            StoreJson.Default.ListArmy));
         Check("a hand-mangled armies.json normalises instead of crashing",
               mangled is [{ Name: "Untitled", Machines: ["AB"] }, { Name: "Untitled", Machines: ["CD"] }]);
 
@@ -1072,22 +1076,25 @@ public static class Selftest
         Check("replacing an army is allowed at the cap, because it does not grow the list",
               ArmyStore.HasRoom(ArmyStore.MaxArmies, replacing: true));
 
-        var mangledBoards = BoardStore.Normalise(System.Text.Json.JsonSerializer.Deserialize<List<StrikeBoard>>(
-            "[null, {\"Name\": null, \"Width\": 4, \"Height\": 8, \"Cells\": null}]"));
+        var mangledBoards = BoardStore.Normalise(System.Text.Json.JsonSerializer.Deserialize(
+            "[null, {\"Name\": null, \"Width\": 4, \"Height\": 8, \"Cells\": null}]",
+            StoreJson.Default.ListStrikeBoard));
         Check("a hand-mangled boards.json normalises instead of crashing",
               mangledBoards is [{ Name: "Untitled", Width: 4, Height: 8 }]
               && mangledBoards[0].Cells.Length == 32);
 
-        var shaped = BoardStore.Normalise(System.Text.Json.JsonSerializer.Deserialize<List<StrikeBoard>>(
+        var shaped = BoardStore.Normalise(System.Text.Json.JsonSerializer.Deserialize(
             "[{\"Name\": \"Cove\", \"Width\": 6, \"Height\": 6, \"PlacementRows\": 2, \"Cells\": ["
-            + string.Join(',', new int[36]) + "]}]"));
+            + string.Join(',', new int[36]) + "]}]",
+            StoreJson.Default.ListStrikeBoard));
         Check("a D-107 shaped board survives the reader rather than being dropped as not-8x8",
               shaped is [{ Name: "Cove", Width: 6, Height: 6 }]
               && shaped[0].At(5, 5) == Terrain.Grassland);
 
         Check("a cells list that does not match its shape is dropped rather than crashing the drawer",
-              BoardStore.Normalise(System.Text.Json.JsonSerializer.Deserialize<List<StrikeBoard>>(
-                  "[{\"Width\": 8, \"Height\": 8, \"Cells\": [0,0,0,0,0,0,0,0,0,0]}]")) is []);
+              BoardStore.Normalise(System.Text.Json.JsonSerializer.Deserialize(
+                  "[{\"Width\": 8, \"Height\": 8, \"Cells\": [0,0,0,0,0,0,0,0,0,0]}]",
+                  StoreJson.Default.ListStrikeBoard)) is []);
 
         var crowdedBoards = Enumerable.Range(0, BoardStore.MaxBoards + 50)
             .Select(i => new StrikeBoard { Name = $"b{i}", Width = 8, Height = 8 })

@@ -445,7 +445,7 @@ public static class BoardStore
 
         try
         {
-            return Normalise(JsonSerializer.Deserialize<List<StrikeBoard>>(File.ReadAllText(path)));
+            return Normalise(JsonSerializer.Deserialize(File.ReadAllText(path), StoreJson.Default.ListStrikeBoard));
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -509,7 +509,7 @@ public static class BoardStore
     {
         try
         {
-            Play.WriteWhole(path, JsonSerializer.Serialize(boards, new JsonSerializerOptions { WriteIndented = true }));
+            Play.WriteWhole(path, JsonSerializer.Serialize(boards, StoreJson.Default.ListStrikeBoard));
             return null;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)

@@ -411,7 +411,7 @@ internal static class Presets
         try
         {
             var text = File.ReadAllText(path);
-            var loaded = JsonSerializer.Deserialize<List<Preset>>(text, Protocol.Json);
+            var loaded = JsonSerializer.Deserialize(text, WireJson.Default.ListPreset);
             if (loaded is null)
             {
                 complaint = $"{FileName} parsed to nothing, using the built-in preset only";

@@ -266,7 +266,12 @@ internal sealed class TunnelClient
         return Convert.FromHexString(uuid.Replace("-", ""));
     }
 
-    public static JsonNode Msg(string variant, object payload)
+    public static JsonNode Msg(string variant, int payload)
+    {
+        return new JsonObject { [variant] = JsonValue.Create(payload) };
+    }
+
+    public static JsonNode Msg(string variant, string payload)
     {
         return new JsonObject { [variant] = JsonValue.Create(payload) };
     }

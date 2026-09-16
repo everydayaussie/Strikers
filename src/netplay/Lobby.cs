@@ -449,20 +449,22 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
 
     private static string SetupContent(Frame f)
     {
-        return System.Text.Json.JsonSerializer.Serialize(new
+        var content = new SetupContent
         {
-            f.Challenge,
-            f.Army,
-            Placements = f.Placements?.Select(p => new[] { p.X, p.Y, p.Dir }),
-            f.Board,
-            f.BoardWidth,
-            f.BoardHeight,
-            f.PlacementRows,
-            f.VictoryPoints,
-            f.DraftPoints,
-            f.First,
-            f.Name,
-        });
+            Challenge = f.Challenge,
+            Army = f.Army,
+            Placements = f.Placements?.Select(p => new[] { p.X, p.Y, p.Dir }).ToList(),
+            Board = f.Board,
+            BoardWidth = f.BoardWidth,
+            BoardHeight = f.BoardHeight,
+            PlacementRows = f.PlacementRows,
+            VictoryPoints = f.VictoryPoints,
+            DraftPoints = f.DraftPoints,
+            First = f.First,
+            Name = f.Name,
+        };
+
+        return System.Text.Json.JsonSerializer.Serialize(content, WireJson.Default.SetupContent);
     }
 
     public static string? LateSetupProblem(bool bothReady, string? accepted, string arriving)

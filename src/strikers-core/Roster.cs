@@ -258,7 +258,7 @@ public sealed class Settings
 
         try
         {
-            return JsonSerializer.Deserialize<Settings>(File.ReadAllText(path)) ?? new Settings();
+            return JsonSerializer.Deserialize(File.ReadAllText(path), StoreJson.Default.Settings) ?? new Settings();
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -280,7 +280,7 @@ public sealed class Settings
 
         try
         {
-            Play.WriteWhole(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            Play.WriteWhole(path, JsonSerializer.Serialize(this, StoreJson.Default.Settings));
             return null;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
@@ -365,7 +365,7 @@ public static class ArmyStore
 
         try
         {
-            return Normalise(JsonSerializer.Deserialize<List<Army>>(File.ReadAllText(path)));
+            return Normalise(JsonSerializer.Deserialize(File.ReadAllText(path), StoreJson.Default.ListArmy));
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -410,7 +410,7 @@ public static class ArmyStore
     {
         try
         {
-            Play.WriteWhole(path, JsonSerializer.Serialize(armies, new JsonSerializerOptions { WriteIndented = true }));
+            Play.WriteWhole(path, JsonSerializer.Serialize(armies, StoreJson.Default.ListArmy));
             return null;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)

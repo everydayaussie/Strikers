@@ -379,15 +379,9 @@ public static class Protocol
 {
     public const int Version = 26;
 
-    public static readonly JsonSerializerOptions Json = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters = { new JsonStringEnumConverter() },
-    };
-
     public static string Encode(Frame f)
     {
-        return JsonSerializer.Serialize(f, Json);
+        return JsonSerializer.Serialize(f, WireJson.Default.Frame);
     }
 
     public static Frame? Decode(string line)
@@ -397,7 +391,7 @@ public static class Protocol
             return null;
         }
 
-        try { return JsonSerializer.Deserialize<Frame>(line, Json); }
+        try { return JsonSerializer.Deserialize(line, WireJson.Default.Frame); }
         catch (Exception e) when (e is JsonException or ArgumentException) { return null; }
     }
 }

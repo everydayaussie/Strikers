@@ -78,7 +78,7 @@ foreach ($project in 'strikers-avalonia', 'netplay', 'live-probe')
     Write-Host "publishing $project"
     dotnet publish (Join-Path $root "src\$project") -c Release -r win-x64 --self-contained true `
         -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true `
-        -p:PublishTrimmed=true -p:TrimMode=partial -p:JsonSerializerIsReflectionEnabledByDefault=true `
+        -p:PublishTrimmed=true -p:TrimMode=partial `
         -p:DebugType=none -p:IncludeSourceRevisionInInformationalVersion=false -p:TrimmerRemoveSymbols=true -p:LauncherOnly=true `
         -o $staging --nologo -v q @props
     if ($LASTEXITCODE -ne 0)
