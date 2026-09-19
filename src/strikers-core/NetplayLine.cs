@@ -63,6 +63,7 @@ public readonly record struct LineReading(
     string? First = null,
     IReadOnlyList<string>? Army = null,
     bool DifferentVersions = false,
+    bool DifferentGameBuilds = false,
     bool PlayerLeft = false,
     bool LeftHere = false);
 
@@ -151,6 +152,8 @@ public static class NetplayLine
         @"^\s*REFUSED: This test build of Strikers is no longer active\b", RegexOptions.Compiled);
     private static readonly Regex VersionRefusedLine = new(
         @"^\s*REFUSED: Strikers version mismatch: ", RegexOptions.Compiled);
+    private static readonly Regex GameBuildRefusedLine = new(
+        @"^\s*REFUSED: game build mismatch: ", RegexOptions.Compiled);
     private static readonly Regex ProtocolRefusedLine = new(
         @"^\s*HALT: the other PC stopped the match: protocol v-?\d{1,10}, relay speaks v\d{1,10}\s*$", RegexOptions.Compiled);
     private static readonly Regex OtherVersionTriedLine = new(
@@ -187,11 +190,13 @@ public static class NetplayLine
 
             var inactive = InactiveLine.IsMatch(line);
             var differentVersions = VersionRefusedLine.IsMatch(line) || ProtocolRefusedLine.IsMatch(line);
+            var differentGameBuilds = GameBuildRefusedLine.IsMatch(line);
             var playerLeft = line.Contains(PlayerLeftReason, StringComparison.OrdinalIgnoreCase);
             var leftHere = playerLeft && !line.Contains(PeerStoppedPrefix, StringComparison.OrdinalIgnoreCase);
 
             return new LineReading(LineMeaning.Halt, Disagreement: disagreement, Inactive: inactive,
-                                   DifferentVersions: differentVersions, PlayerLeft: playerLeft, LeftHere: leftHere);
+                                   DifferentVersions: differentVersions, DifferentGameBuilds: differentGameBuilds,
+                                   PlayerLeft: playerLeft, LeftHere: leftHere);
         }
 
         if (PortInUseLine.IsMatch(line))

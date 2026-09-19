@@ -437,6 +437,12 @@ public static class Play
         return ("Stopped", "Strikers could not follow the last turn, so it stopped the match on both PCs.");
     }
 
+    public static (string Headline, string Detail) GameBuildsText()
+    {
+        return ("Your games are on different builds",
+                "Let Steam update Horizon Forbidden West on both PCs, then try again.");
+    }
+
     public static (string Headline, string Detail) InactiveText()
     {
         return ("This test build is no longer active", "Ask the person who gave it to you for a new one.");

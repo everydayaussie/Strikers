@@ -691,6 +691,13 @@ public partial class PlayPanel
                         return;
                     }
 
+                    if (Play.ShowsVersionScreen(read.DifferentGameBuilds, playSpawned))
+                    {
+                        var (buildsStep, buildsDetail) = Play.GameBuildsText();
+                        SayBad(buildsStep, buildsDetail);
+                        return;
+                    }
+
                     if (read.PlayerLeft)
                     {
                         var (leftStep, leftDetail) = Play.LeftText(read.LeftHere);

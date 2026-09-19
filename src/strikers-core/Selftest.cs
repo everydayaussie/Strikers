@@ -2198,6 +2198,17 @@ public static class Selftest
               && NetplayLine.Read("HALT: desync after turn 4: pieces differ", true, true)
                   is { Meaning: LineMeaning.Halt, DifferentVersions: false });
 
+        Check("a game build refusal reads as different game builds and gets its own screen, and no other halt does",
+              NetplayLine.Read("REFUSED: game build mismatch: this PC is 667B1777-949F000, the other is 667B1777-949F001. Both players must run the same version of Horizon Forbidden West.", true, true)
+                  is { Meaning: LineMeaning.Halt, DifferentGameBuilds: true, DifferentVersions: false, Disagreement: false }
+              && NetplayLine.Read("REFUSED: Strikers version mismatch: this PC runs netplay aa, the other netplay bb. Update both PCs to the same Strikers version, then try again.", true, true)
+                  is { DifferentGameBuilds: false }
+              && NetplayLine.Read("HALT: desync after turn 4: pieces differ", true, true)
+                  is { DifferentGameBuilds: false }
+              && Play.GameBuildsText() is { Headline: "Your games are on different builds" } builds
+              && builds.Detail.Contains("Steam") && !builds.Detail.Contains(';') && !builds.Headline.Contains(';')
+              && Play.ShowsVersionScreen(true, playStarted: false) && !Play.ShowsVersionScreen(true, playStarted: true));
+
         Check("the host's relay line about another version reads as a notice, not a halt (D-242)",
               NetplayLine.Read(Release.OtherVersionTried + " (protocol v24)", true, true).Meaning == LineMeaning.OtherVersionTried
               && NetplayLine.Read(Release.OtherVersionTried + " (protocol v24) from 1.2.3.4", true, true).Meaning == LineMeaning.Nothing);
