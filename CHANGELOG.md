@@ -1,5 +1,5 @@
 # Changelog
 
-## 1.0.0, not yet released
+## 1.0.0, 2026-09-19
 
 First release.
