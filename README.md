@@ -2,7 +2,7 @@
 
 Online multiplayer for Machine Strike, the board game inside Horizon Forbidden West.
 
-Download it from Nexus Mods: https://www.nexusmods.com/horizonforbiddenwest/mods/209. That page has the instructions to play.
+Download Strikers.zip from this repository's Releases, or from Nexus Mods: https://www.nexusmods.com/horizonforbiddenwest/mods/209. The Nexus page has the instructions to play.
 
 To check a download, run `Get-FileHash Strikers.zip` in PowerShell and compare the hash with the SHA-256 in this repository's tag for that version (Tags, then the three dots beside the version).
 
