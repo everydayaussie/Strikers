@@ -11,11 +11,6 @@
     <RootNamespace>Strikers.LiveProbe</RootNamespace>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(TestBuildFor)' != ''">
-    <AssemblyMetadata Include="TestBuildFor" Value="$(TestBuildFor)" />
-    <AssemblyMetadata Include="TestBuildExpires" Value="$(TestBuildExpires)" />
-  </ItemGroup>
-
   <ItemGroup Condition="'$(LauncherOnly)' == 'true'">
     <AssemblyMetadata Include="LauncherOnly" Value="true" />
   </ItemGroup>

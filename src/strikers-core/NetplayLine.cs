@@ -25,6 +25,8 @@ public enum LineMeaning
 
     TheirArmy,
 
+    TheirName,
+
     BothReady,
 
     PeerConfirmed,
@@ -48,6 +50,12 @@ public enum LineMeaning
     UnsharedMatch,
 
     OtherVersionTried,
+
+    ArmyDoesNotFit,
+
+    TheirRecording,
+
+    TheirLog,
 }
 
 public readonly record struct LineReading(
@@ -58,19 +66,41 @@ public readonly record struct LineReading(
     int VictoryPoints = -1,
     int DraftPoints = -1,
     bool Disagreement = false,
-    bool Inactive = false,
+    bool SetupsDiffer = false,
     string? Binding = null,
     string? First = null,
     IReadOnlyList<string>? Army = null,
     bool DifferentVersions = false,
     bool DifferentGameBuilds = false,
+    bool UnknownGameBuild = false,
     bool PlayerLeft = false,
-    bool LeftHere = false);
+    bool LeftHere = false,
+    bool GameClosed = false,
+    bool ClosedHere = false,
+    int Machines = -1,
+    int PlacingSquares = -1,
+    string? Name = null);
 
 public static class NetplayLine
 {
     public const string PlayerLeftReason = "a player left the match before it ended";
     public const string PeerStoppedPrefix = "the other PC stopped the match";
+    public const string GameClosedReason = "the game on this PC closed before the match ended";
+    public const string SetupsDifferReason =
+        "the two PCs hold different setups (the armies, the board or the rules), so the match cannot start";
+    public const string NoChallengeListLine =
+        "the game has no Machine Strike challenge list open, so the setup is incomplete. " +
+        "Open the challenge list, then run write again.";
+
+    public static bool ProvesTheOpponentIsHere(LineMeaning meaning, bool bothConfirmed = false)
+    {
+        if (meaning == LineMeaning.PeerMovedToPlay)
+        {
+            return bothConfirmed;
+        }
+
+        return meaning is LineMeaning.BothPlayersReady;
+    }
 
     public static bool ProvesTheLink(LineMeaning meaning)
     {
@@ -86,6 +116,9 @@ public static class NetplayLine
 
             case LineMeaning.CodeChanged:
             case LineMeaning.OtherVersionTried:
+            case LineMeaning.ArmyDoesNotFit:
+            case LineMeaning.TheirRecording:
+            case LineMeaning.TheirLog:
                 return false;
 
             case LineMeaning.BothPlayersReady:
@@ -94,6 +127,7 @@ public static class NetplayLine
             case LineMeaning.Fingerprint:
             case LineMeaning.TheirSetup:
             case LineMeaning.TheirArmy:
+            case LineMeaning.TheirName:
             case LineMeaning.BothReady:
             case LineMeaning.PeerConfirmed:
             case LineMeaning.SessionBound:
@@ -148,12 +182,15 @@ public static class NetplayLine
 
     private static readonly Regex MatchOverLine = new(@"^\s*match over: ", RegexOptions.Compiled);
 
-    private static readonly Regex InactiveLine = new(
-        @"^\s*REFUSED: This test build of Strikers is no longer active\b", RegexOptions.Compiled);
     private static readonly Regex VersionRefusedLine = new(
         @"^\s*REFUSED: Strikers version mismatch: ", RegexOptions.Compiled);
     private static readonly Regex GameBuildRefusedLine = new(
         @"^\s*REFUSED: game build mismatch: ", RegexOptions.Compiled);
+    private static readonly Regex UnknownGameBuildLine = new(
+        @"^\s*REFUSED: game build not supported: ", RegexOptions.Compiled);
+    private static readonly Regex SetupsDifferLine = new(
+        @"^\s*HALT: (" + Regex.Escape(PeerStoppedPrefix) + @": )?" + Regex.Escape(SetupsDifferReason) + @"\s*$",
+        RegexOptions.Compiled);
     private static readonly Regex ProtocolRefusedLine = new(
         @"^\s*HALT: the other PC stopped the match: protocol v-?\d{1,10}, relay speaks v\d{1,10}\s*$", RegexOptions.Compiled);
     private static readonly Regex OtherVersionTriedLine = new(
@@ -163,6 +200,17 @@ public static class NetplayLine
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex UnsharedMatchLine = new(
         @"^\s*a new match started on this PC after the shared one ended\b", RegexOptions.Compiled);
+    private static readonly Regex TheirRecordingLine = new(
+        @"^\s*<- the other player's recording of the match is in recordings, opponent-[0-9*]{8}-[0-9*]{6}\.jsonl\s*$",
+        RegexOptions.Compiled);
+    private static readonly Regex TheirLogLine = new(
+        @"^\s*<- the other player's log is in recordings, opponent-[0-9*]{8}-[0-9*]{6}\.log\s*$",
+        RegexOptions.Compiled);
+
+    public static bool UnknownGameBuildSaid(string line)
+    {
+        return UnknownGameBuildLine.IsMatch(line);
+    }
 
     public static LineReading Read(string line, bool hosting, bool haveInvite, string? tunnelHost = null)
     {
@@ -183,20 +231,47 @@ public static class NetplayLine
         if (line.Contains("HALT", StringComparison.OrdinalIgnoreCase)
             || line.StartsWith("REFUSED", StringComparison.OrdinalIgnoreCase))
         {
-            var disagreement = line.Contains("desync", StringComparison.OrdinalIgnoreCase)
-                            || line.Contains("hash", StringComparison.OrdinalIgnoreCase)
-                            || line.Contains("board", StringComparison.OrdinalIgnoreCase)
-                            || line.Contains("diverge", StringComparison.OrdinalIgnoreCase);
+            var setupsDiffer = SetupsDifferLine.IsMatch(line);
+            var disagreement = !setupsDiffer
+                            && (line.Contains("desync", StringComparison.OrdinalIgnoreCase)
+                                || line.Contains("hash", StringComparison.OrdinalIgnoreCase)
+                                || line.Contains("board", StringComparison.OrdinalIgnoreCase)
+                                || line.Contains("diverge", StringComparison.OrdinalIgnoreCase));
 
-            var inactive = InactiveLine.IsMatch(line);
             var differentVersions = VersionRefusedLine.IsMatch(line) || ProtocolRefusedLine.IsMatch(line);
             var differentGameBuilds = GameBuildRefusedLine.IsMatch(line);
+            var unknownGameBuild = UnknownGameBuildSaid(line);
             var playerLeft = line.Contains(PlayerLeftReason, StringComparison.OrdinalIgnoreCase);
             var leftHere = playerLeft && !line.Contains(PeerStoppedPrefix, StringComparison.OrdinalIgnoreCase);
+            var gameClosed = line.Contains(GameClosedReason, StringComparison.OrdinalIgnoreCase);
+            var closedHere = gameClosed && !line.Contains(PeerStoppedPrefix, StringComparison.OrdinalIgnoreCase);
 
-            return new LineReading(LineMeaning.Halt, Disagreement: disagreement, Inactive: inactive,
+            return new LineReading(LineMeaning.Halt, Disagreement: disagreement, SetupsDiffer: setupsDiffer,
                                    DifferentVersions: differentVersions, DifferentGameBuilds: differentGameBuilds,
-                                   PlayerLeft: playerLeft, LeftHere: leftHere);
+                                   UnknownGameBuild: unknownGameBuild,
+                                   PlayerLeft: playerLeft, LeftHere: leftHere,
+                                   GameClosed: gameClosed, ClosedHere: closedHere);
+        }
+
+        if (TheirRecordingLine.IsMatch(line))
+        {
+            return new LineReading(LineMeaning.TheirRecording);
+        }
+
+        if (TheirLogLine.IsMatch(line))
+        {
+            return new LineReading(LineMeaning.TheirLog);
+        }
+
+        if (Play.TheirName(line) is { } theirName)
+        {
+            return new LineReading(LineMeaning.TheirName, Name: theirName);
+        }
+
+        if (Play.ArmyFit(line) is { } fit)
+        {
+            return new LineReading(LineMeaning.ArmyDoesNotFit,
+                                   Machines: fit.Machines, PlacingSquares: fit.PlacingSquares);
         }
 
         if (PortInUseLine.IsMatch(line))

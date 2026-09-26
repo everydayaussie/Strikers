@@ -464,6 +464,7 @@ internal static class CommitTranscript
         }
 
         var moves = new List<Move>(read.Actions.Count);
+        var lastVictimPair = -1;
         for (var a = 0; a < read.Actions.Count; a++)
         {
             var act = read.Actions[a];
@@ -477,7 +478,7 @@ internal static class CommitTranscript
             var landX = act.ToX;
             var landY = act.ToY;
             var landed = -1;
-            for (var i = opens[a]; i <= end; i++)
+            for (var i = opens[a]; i <= end && landed < 0; i++)
             {
                 foreach (var p in samples[i].Pieces)
                 {
@@ -500,6 +501,29 @@ internal static class CommitTranscript
                 dive = true;
             }
 
+            byte? chargeFacing = null;
+            (int X, int Y)? chargeStood = null;
+            if (!dive && act.Kind == TranscriptKind.Attack &&
+                ChargeLanding(samples, localOwner, act, opens[a], diveEnd) is { } charger)
+            {
+                landed = charger.Sample;
+                chargeFacing = charger.Facing;
+                chargeStood = (charger.X, charger.Y);
+            }
+
+            if (!dive && chargeStood is null && landed >= 0)
+            {
+                landed = SettledLanding(samples, localOwner, act.ToX, act.ToY, landed, end);
+            }
+
+            byte? fallenFacing = null;
+            if (landed < 0 && act.Kind == TranscriptKind.Move &&
+                DiedAtLanding(samples, localOwner, act, opens[a], end) is { } fallen)
+            {
+                landed = fallen.Sample;
+                fallenFacing = fallen.Facing;
+            }
+
             if (landed < 0)
             {
                 return new Reading([], null,
@@ -520,6 +544,16 @@ internal static class CommitTranscript
                 }
             }
 
+            if (chargeFacing is { } charged)
+            {
+                facing = charged;
+            }
+
+            if (fallenFacing is { } fell)
+            {
+                facing = fell;
+            }
+
             var move = new Move
             {
                 SrcX = act.FromX,
@@ -529,11 +563,14 @@ internal static class CommitTranscript
                 Facing = facing,
                 Burst = act.Burst,
                 Attack = act.Kind == TranscriptKind.Attack,
+                LandX = chargeStood?.X ?? landX,
+                LandY = chargeStood?.Y ?? landY,
             };
 
             if (act.Kind == TranscriptKind.Attack)
             {
-                var victim = FirstVictim(samples, localOwner, opens[a], end);
+                var victimFrom = opens[a] > 0 && lastVictimPair != opens[a] - 1 ? opens[a] - 1 : opens[a];
+                var victim = FirstVictim(samples, localOwner, victimFrom, end);
                 if (victim is not { } v)
                 {
                     return new Reading([], null,
@@ -543,6 +580,13 @@ internal static class CommitTranscript
 
                 move.TargetX = v.X;
                 move.TargetY = v.Y;
+                lastVictimPair = v.Pair;
+
+                if (!dive && chargeFacing is null
+                    && FacingOf(samples[v.Pair + 1], localOwner, landX, landY, lander.Uuid) is { } struck)
+                {
+                    move.Facing = struck;
+                }
 
                 if (dive)
                 {
@@ -608,8 +652,128 @@ internal static class CommitTranscript
         return f;
     }
 
-    private static (int X, int Y)? FirstVictim(IReadOnlyList<BoardSnapshot> samples, int localOwner,
-                                               int from, int to)
+    internal static byte? FacingOf(BoardSnapshot sample, int localOwner, int x, int y, string uuid)
+    {
+        foreach (var p in sample.Pieces)
+        {
+            if (p.Owner == localOwner && p.X == x && p.Y == y && (uuid.Length == 0 || p.Uuid == uuid))
+            {
+                return p.Facing;
+            }
+        }
+
+        return null;
+    }
+
+    internal static int SettledLanding(IReadOnlyList<BoardSnapshot> samples, int localOwner, int x, int y,
+                                       int first, int end)
+    {
+        Piece? arrived = null;
+        foreach (var p in samples[first].Pieces)
+        {
+            if (p.Owner == localOwner && p.X == x && p.Y == y)
+            {
+                arrived = p;
+                break;
+            }
+        }
+
+        if (arrived is not { } was || was.Acts < 0 || was.Bursts < 0 || was.Uuid.Length == 0)
+        {
+            return first;
+        }
+
+        for (var i = first + 1; i <= end && i < samples.Count; i++)
+        {
+            foreach (var p in samples[i].Pieces)
+            {
+                if (p.Owner == localOwner && p.X == x && p.Y == y && p.Uuid == was.Uuid
+                    && (p.Acts != was.Acts || p.Bursts != was.Bursts))
+                {
+                    return i;
+                }
+            }
+        }
+
+        return first;
+    }
+
+    internal static (int Sample, byte Facing)? DiedAtLanding(IReadOnlyList<BoardSnapshot> samples, int localOwner,
+                                                              TranscriptAction act, int from, int to)
+    {
+        Piece? last = null;
+        var lastAt = -1;
+        for (var i = Math.Max(from - 1, 0); i <= to && i < samples.Count; i++)
+        {
+            var p = BySlot(samples[i].Pieces, act.Unit);
+            if (p is { } here && here.Owner == localOwner && (last is null || here.Uuid == last.Value.Uuid))
+            {
+                last = here;
+                lastAt = i;
+                continue;
+            }
+
+            if (last is { } was && OursCount(samples[i], localOwner) < OursCount(samples[lastAt], localOwner))
+            {
+                return (lastAt, was.Facing);
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+
+    private static int OursCount(BoardSnapshot s, int localOwner)
+    {
+        var count = 0;
+        foreach (var p in s.Pieces)
+        {
+            if (p.Owner == localOwner)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static (int Sample, byte Facing, int X, int Y)? ChargeLanding(IReadOnlyList<BoardSnapshot> samples,
+                                                                          int localOwner, TranscriptAction act,
+                                                                          int from, int to)
+    {
+        if (BySlot(samples[from].Pieces, act.Unit) is not { } first || first.Owner != localOwner ||
+            Machines.Find(first.Uuid) is not { Pattern: "Dash" } machine)
+        {
+            return null;
+        }
+
+        var count = samples[from].Pieces.Count;
+        for (var i = from; i <= to && i < samples.Count; i++)
+        {
+            if (samples[i].Pieces.Count != count)
+            {
+                break;
+            }
+
+            if (BySlot(samples[i].Pieces, act.Unit) is not { } p || p.Owner != localOwner || p.Uuid != first.Uuid)
+            {
+                break;
+            }
+
+            var range = p.Range > 0 ? p.Range : machine.Range;
+            var (dx, dy) = MoveDetector.Step(p.Facing);
+            if (p.X == act.ToX + dx * range && p.Y == act.ToY + dy * range)
+            {
+                return (i, p.Facing, p.X, p.Y);
+            }
+        }
+
+        return null;
+    }
+
+    private static (int X, int Y, int Pair)? FirstVictim(IReadOnlyList<BoardSnapshot> samples, int localOwner,
+                                                         int from, int to)
     {
         for (var k = from; k < to && k + 1 < samples.Count; k++)
         {
@@ -648,7 +812,7 @@ internal static class CommitTranscript
                         stillThere = true;
                         if (q.Health < p.Health)
                         {
-                            return (p.X, p.Y);
+                            return (p.X, p.Y, k);
                         }
 
                         break;
@@ -657,7 +821,7 @@ internal static class CommitTranscript
 
                 if (!stillThere && theirsAfter < theirsBefore)
                 {
-                    return (p.X, p.Y);
+                    return (p.X, p.Y, k);
                 }
             }
         }

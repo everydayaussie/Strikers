@@ -130,6 +130,10 @@ public sealed class StrikeBoard
 
     public const int MaxShareLength = 64;
 
+    public const string NotACode = "That is not a board code.";
+
+    public const string Damaged = "That board code is damaged. Copy the whole code again.";
+
     private const string Base36 = "0123456789abcdefghijklmnopqrstuvwxyz";
 
     private const int CheckSpan = 36 * 36 * 36;
@@ -202,13 +206,13 @@ public sealed class StrikeBoard
 
         if (trimmed.Length > MaxShareLength)
         {
-            problem = $"that is longer than any shared board, which is at most {MaxShareLength} characters";
+            problem = NotACode;
             return null;
         }
 
         if (!trimmed.StartsWith(SharePrefix, StringComparison.OrdinalIgnoreCase))
         {
-            problem = $"that does not look like a shared board, which starts with {SharePrefix}";
+            problem = NotACode;
             return null;
         }
 
@@ -221,7 +225,7 @@ public sealed class StrikeBoard
 
         if (text.Length < 5 || !FromBase36(text[..2], out var head))
         {
-            problem = "that is not shaped like a shared board. Copy the whole line and paste it again.";
+            problem = Damaged;
             return null;
         }
 
@@ -230,12 +234,11 @@ public sealed class StrikeBoard
             if (FromBase36(text[^3..], out var futureCheck) &&
                 futureCheck == (int)(Hash(text[..^3]) % CheckSpan))
             {
-                problem = "that board is from a newer Strikers than this one. Update both PCs to " +
-                          "the same Strikers version and paste it again.";
+                problem = "That board code is from a newer Strikers. Update Strikers, then paste it again.";
             }
             else
             {
-                problem = "that is not shaped like a shared board. Copy the whole line and paste it again.";
+                problem = Damaged;
             }
 
             return null;
@@ -251,14 +254,13 @@ public sealed class StrikeBoard
         var expected = 2 + ((written + 1) / 2) + 3;
         if (text.Length != expected)
         {
-            problem = $"that board says it is {width} by {height}, which takes {expected} characters, " +
-                      $"but it carries {text.Length}. Copy the whole line and paste it again.";
+            problem = Damaged;
             return null;
         }
 
         if (!FromBase36(text[^3..], out var given) || given != (int)(Hash(text[..^3]) % CheckSpan))
         {
-            problem = "that board did not survive the trip: its check digits do not match. Copy it again.";
+            problem = Damaged;
             return null;
         }
 
@@ -266,16 +268,14 @@ public sealed class StrikeBoard
         {
             if (!Base36.Contains(c))
             {
-                problem = "that shared board carries a character that does not belong in one. " +
-                          "Copy the whole line and paste it again.";
+                problem = Damaged;
                 return null;
             }
         }
 
         if (depth * 2 > height)
         {
-            problem = $"that board asks for a placing depth of {depth} on {height} rows, which would " +
-                      "make the two players' placing zones overlap.";
+            problem = "That board's two placing zones overlap, so it cannot be used.";
             return null;
         }
 
@@ -415,6 +415,8 @@ public static class BoardStore
 {
     public const int MaxBoards = 32;
 
+    public const string ShelfFull = "The board list is full. Delete a board first.";
+
     public static bool HasRoom(int saved)
     {
         return saved < MaxBoards;
@@ -514,7 +516,7 @@ public static class BoardStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            return Play.WithoutPath($"could not write {path}: {e.Message}", path);
+            return Play.WithoutPath($"Could not save {path}. {e.Message}", path);
         }
     }
 }

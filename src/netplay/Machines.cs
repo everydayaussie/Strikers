@@ -60,6 +60,7 @@ internal static class Machines
 
     public const int StockDraftPoints = 10;
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060", Justification = "D-104")]
     public static string? CannotPlay(Machine m)
     {
         return null;
@@ -93,15 +94,109 @@ internal static class Machines
         return strike.Attack && !strike.Burst && inPlace && sameMachine && !ownNext;
     }
 
+    public const int ActivationsPerTurn = 2;
+
+    private static bool LeftByAttack(Move attack, (int X, int Y) square, int reach)
+    {
+        if (square == (attack.SrcX, attack.SrcY) || square == (attack.DstX, attack.DstY)
+            || square == attack.StrikeFrom || square == (attack.TargetX, attack.TargetY)
+            || square == (attack.LandX, attack.LandY))
+        {
+            return true;
+        }
+
+        var (dx, dy) = MoveDetector.Step(attack.Facing);
+        for (var along = 1; along <= reach; along++)
+        {
+            if (square == (attack.StrikeFrom.X + dx * along, attack.StrikeFrom.Y + dy * along))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool StartsActivation(IReadOnlyList<Move> turn, int i, int reach)
+    {
+        var m = turn[i];
+        if (m.Burst)
+        {
+            return false;
+        }
+
+        if (i == 0)
+        {
+            return true;
+        }
+
+        var before = turn[i - 1];
+        var folded = i >= 2 && FoldsIntoAttack(turn, i - 2);
+        var owedMove = !m.Attack && before.Attack && !before.Burst && !folded
+                       && LeftByAttack(before, (m.SrcX, m.SrcY), reach);
+        return !owedMove && !FoldsIntoAttack(turn, i - 1);
+    }
+
+    internal static int Activations(IReadOnlyList<Move> turn, int reach)
+    {
+        var activations = 0;
+        for (var i = 0; i < turn.Count; i++)
+        {
+            if (StartsActivation(turn, i, reach))
+            {
+                activations++;
+            }
+        }
+
+        return activations;
+    }
+
+    private static string? StrikeSquareProblem(Move m, Machine machine, int range)
+    {
+        if (!m.Attack || m.AtkX < 0 || m.AtkY < 0 || (m.AtkX == m.DstX && m.AtkY == m.DstY))
+        {
+            return null;
+        }
+
+        if (machine.Pattern == "Dive")
+        {
+            var beside = Math.Max(Math.Abs(m.DstX - m.TargetX), Math.Abs(m.DstY - m.TargetY)) <= 1;
+            return beside
+                ? null
+                : $"lands a {machine.Name} on ({m.DstX},{m.DstY}), and a Dive lands next to its victim on " +
+                  $"({m.TargetX},{m.TargetY})";
+        }
+
+        if (machine.Pattern == "Dash")
+        {
+            var (dx, dy) = MoveDetector.Step(m.Facing);
+            var lands = (X: m.AtkX + dx * range, Y: m.AtkY + dy * range);
+            return m.DstX == lands.X && m.DstY == lands.Y
+                ? null
+                : $"lands a {machine.Name} on ({m.DstX},{m.DstY}), and its charge from ({m.AtkX},{m.AtkY}) " +
+                  $"facing {m.Facing} ends on ({lands.X},{lands.Y})";
+        }
+
+        return $"strikes from ({m.AtkX},{m.AtkY}) and leaves a {machine.Name} on ({m.DstX},{m.DstY}), and only " +
+               "a Dive or a Dash finishes away from the square it strikes from";
+    }
+
     public static string? TurnProblem(IReadOnlyList<Move> turn, BoardSnapshot board, int seat)
     {
+        var activations = Activations(turn, Math.Max(board.Width, board.Height));
+        if (activations > ActivationsPerTurn)
+        {
+            return $"the turn has {activations} activations, and a turn has {ActivationsPerTurn}, " +
+                   "with an Overcharge as the only extra action";
+        }
+
         var pieces = board.Pieces.Where(p => p.Owner == seat)
-                          .Select(p => (p.X, p.Y, p.Uuid))
+                          .Select(p => (p.X, p.Y, p.Uuid, p.Range))
                           .ToList();
         for (var i = 0; i < turn.Count; i++)
         {
             var m = turn[i];
-            var at = pieces.FindIndex(p => p.X == m.SrcX && p.Y == m.SrcY);
+            var at = pieces.FindLastIndex(p => p.X == m.SrcX && p.Y == m.SrcY);
             if (at < 0)
             {
                 continue;
@@ -110,11 +205,33 @@ internal static class Machines
             var machine = Find(pieces[at].Uuid);
             if (machine is not null)
             {
+                var range = pieces[at].Range >= 1 ? pieces[at].Range : machine.Range;
+                if (m.Charged)
+                {
+                    var (dx, dy) = MoveDetector.Step(m.Facing);
+                    var ends = (X: m.DstX + dx * range, Y: m.DstY + dy * range);
+                    if (machine.Pattern != "Dash")
+                    {
+                        return $"action {i + 1} charges a {machine.Name}, whose pattern is {machine.Pattern}";
+                    }
+
+                    if (m.LandX != ends.X || m.LandY != ends.Y)
+                    {
+                        return $"action {i + 1} lands a {machine.Name} on ({m.LandX},{m.LandY}), and its charge " +
+                               $"from ({m.DstX},{m.DstY}) facing {m.Facing} ends on ({ends.X},{ends.Y})";
+                    }
+                }
+
+                if (StrikeSquareProblem(m, machine, range) is { } strikeSquare)
+                {
+                    return $"action {i + 1} {strikeSquare}";
+                }
+
                 (int X, int Y) stand = m.Attack ? m.StrikeFrom : (m.DstX, m.DstY);
                 var steps = Math.Abs(stand.X - m.SrcX) + Math.Abs(stand.Y - m.SrcY);
                 var strikes = m.Attack || FoldsIntoAttack(turn, i);
                 var extra = !strikes ? 1
-                            : machine.Pattern == "Dash" ? machine.Range
+                            : machine.Pattern == "Dash" ? range
                             : machine.Pattern == "Ram" ? 1
                             : 0;
                 if (steps > machine.Move + extra)
@@ -128,7 +245,10 @@ internal static class Machines
                 }
             }
 
-            pieces[at] = (m.DstX, m.DstY, pieces[at].Uuid);
+            var stands = m.Charged ? (X: m.LandX, Y: m.LandY) : (X: m.DstX, Y: m.DstY);
+            var acted = pieces[at];
+            pieces.RemoveAt(at);
+            pieces.Add((stands.X, stands.Y, acted.Uuid, acted.Range));
         }
 
         return null;

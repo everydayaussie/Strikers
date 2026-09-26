@@ -24,7 +24,13 @@ public enum MsgKind
 
     Sealed,
 
+    Recording,
+
     KeyCommit,
+
+    RecordingStart,
+
+    Log,
 }
 
 public sealed class Frame
@@ -42,7 +48,9 @@ public sealed class Frame
     [JsonPropertyName("netplay")] public string? NetplayVersion { get; set; }
     [JsonPropertyName("probe")] public string? ProbeVersion { get; set; }
 
-    [JsonPropertyName("day")] public string? Day { get; set; }
+    [JsonPropertyName("part")] public int Part { get; set; } = -1;
+    [JsonPropertyName("parts")] public int Parts { get; set; } = -1;
+    [JsonPropertyName("data")] public string? Data { get; set; }
 
     [JsonPropertyName("challenge")] public string? Challenge { get; set; }
     [JsonPropertyName("army")] public List<string>? Army { get; set; }
@@ -85,6 +93,8 @@ public sealed class Frame
     [JsonPropertyName("role")] public SessionRole? Role { get; set; }
 
     [JsonPropertyName("box")] public string? Box { get; set; }
+
+    [JsonPropertyName("setupDigest")] public string? SetupDigest { get; set; }
 }
 
 public sealed class Placement
@@ -119,6 +129,18 @@ public sealed class Move
     [JsonPropertyName("atkX")] public int AtkX { get; set; } = -1;
     [JsonPropertyName("atkY")] public int AtkY { get; set; } = -1;
 
+    [JsonPropertyName("landX")] public int LandX { get; set; } = -1;
+    [JsonPropertyName("landY")] public int LandY { get; set; } = -1;
+
+    public bool Charged
+    {
+        get
+        {
+            return Attack && AtkX < 0 && AtkY < 0 && LandX >= 0 && LandY >= 0
+                   && (LandX != DstX || LandY != DstY);
+        }
+    }
+
     public (int X, int Y) StrikeFrom
     {
         get
@@ -147,6 +169,8 @@ public sealed class Move
             Burst = Burst,
             AtkX = AtkX < 0 ? -1 : width - 1 - AtkX,
             AtkY = AtkY < 0 ? -1 : height - 1 - AtkY,
+            LandX = LandX < 0 ? -1 : width - 1 - LandX,
+            LandY = LandY < 0 ? -1 : height - 1 - LandY,
         };
     }
 }
@@ -172,6 +196,26 @@ public static class FrameLimits
     public static readonly TimeSpan RateWindow = TimeSpan.FromSeconds(10);
 
     public const int MaxPendingTurns = 8;
+
+    public const int MaxRecordingParts = 64;
+
+    public const int MaxRecordingStartParts = 6;
+
+    public const int MaxRecordingTailParts = 50;
+
+    public const int MaxLogParts = 8;
+
+    public const int MaxHaltParts = 64;
+
+    public const int MaxRecordingPartChars = 32 * 1024;
+
+    public const int MaxRecordingBytes = 1536 * 1024;
+
+    public const int MaxRecordingStartBytes = 128 * 1024;
+
+    public const int MaxRecordingTailBytes = MaxRecordingTailParts * MaxRecordingPartChars / 4 * 3;
+
+    public const int MaxLogBytes = 192 * 1024;
 
     public const int MaxReasonChars = 300;
 
@@ -210,7 +254,8 @@ public static class FrameLimits
         {
             var m = moves[i];
             if (Outside(m.SrcX, width) || Outside(m.SrcY, height) || Outside(m.DstX, width) || Outside(m.DstY, height)
-                || m.TargetX >= width || m.TargetY >= height || m.AtkX >= width || m.AtkY >= height)
+                || m.TargetX >= width || m.TargetY >= height || m.AtkX >= width || m.AtkY >= height
+                || m.LandX >= width || m.LandY >= height || m.LandX < -1 || m.LandY < -1)
             {
                 return $"action {i + 1} names a square off this {width}x{height} board";
             }
@@ -353,7 +398,8 @@ public enum SessionPhase
 
 public static class FrameGate
 {
-    public static string? Refuse(SessionPhase phase, Frame f, IReadOnlySet<int> writtenSlots)
+    public static string? Refuse(SessionPhase phase, Frame f, IReadOnlySet<int> writtenSlots,
+                                 IReadOnlySet<(int X, int Y)> writtenSquares)
     {
         switch (f.Kind)
         {
@@ -362,6 +408,9 @@ public static class FrameGate
 
             case MsgKind.Place when f.PlaceIdx >= 0 && writtenSlots.Contains(f.PlaceIdx):
                 return $"a second placement for machine {f.PlaceIdx}, which is already written";
+
+            case MsgKind.Place when f.Place is { } square && writtenSquares.Contains((square.X, square.Y)):
+                return $"a placement on ({square.X},{square.Y}), where one of their machines is already placed";
 
             case MsgKind.Place when phase is SessionPhase.Playing or SessionPhase.Over:
                 return "a placement after the placement phase has finished";
@@ -377,7 +426,7 @@ public static class FrameGate
 
 public static class Protocol
 {
-    public const int Version = 26;
+    public const int Version = 30;
 
     public static string Encode(Frame f)
     {
@@ -391,7 +440,13 @@ public static class Protocol
             return null;
         }
 
-        try { return JsonSerializer.Deserialize(line, WireJson.Default.Frame); }
-        catch (Exception e) when (e is JsonException or ArgumentException) { return null; }
+        try
+        {
+            return JsonSerializer.Deserialize(line, WireJson.Default.Frame);
+        }
+        catch (Exception e) when (e is JsonException or ArgumentException)
+        {
+            return null;
+        }
     }
 }

@@ -155,6 +155,24 @@ internal static partial class Program
         Check("the halt reason crosses to the other peer",
               h2.HaltReason?.Contains("injection failed") == true);
 
+        var hx1 = new Peer("127.0.0.1", port, "HASHRM", 0);
+        var hx2 = new Peer("127.0.0.1", port, "HASHRM", 1);
+        _ = hx1.Run(cts.Token);
+        _ = hx2.Run(cts.Token);
+        await Until(() => hx1.Fingerprint is not null && hx2.Fingerprint is not null, cts.Token);
+
+        var comparedBlind = hx1.CheckHash(
+            new Frame { Kind = MsgKind.Hash, Turn = 7, PieceHash = new string('a', FrameLimits.HashLength),
+                        TerrainHash = new string('b', FrameLimits.HashLength) },
+            new List<BoardSnapshot>(), 7);
+        await Until(() => hx2.Halted && hx2.HaltReason is not null, cts.Token);
+
+        Check("a halt raised while comparing hashes tells the other side too",
+              !comparedBlind && hx1.Halted && hx2.Halted
+              && hx1.HaltReason?.Contains("no board of ours") == true
+              && hx2.HaltReason?.Contains("no board of ours") == true
+              && hx2.HaltReason?.StartsWith("the other PC stopped the match: ", StringComparison.Ordinal) == true);
+
         var inboxBig = new List<Frame>();
         var big1 = new Peer("127.0.0.1", port, "BIGRM", 0);
         var big2 = new Peer("127.0.0.1", port, "BIGRM", 1);
@@ -382,6 +400,65 @@ internal static partial class Program
         Check("a halt raised in a handler stops the read loop, and the frame behind it reaches no handler",
               haltHost.Halted && haltSawHashOnly);
 
+        var (drainHost, drainGuest) = await Pair(port, cts.Token);
+        var drainSeen = new List<MsgKind>();
+        drainHost.Received += f =>
+        {
+            lock (drainSeen)
+            {
+                drainSeen.Add(f.Kind);
+            }
+        };
+        await Until(() => drainHost.Fingerprint is not null && drainGuest.Fingerprint is not null, cts.Token);
+        drainHost.HaltAndTell("halted by the poller, outside any handler");
+        drainGuest.Send(new Frame
+        {
+            Kind = MsgKind.RecordingStart, Part = 0, Parts = 1,
+            Data = Convert.ToBase64String("{}"u8.ToArray()),
+        });
+        drainGuest.Send(new Frame { Kind = MsgKind.Rematch });
+        await Task.Delay(800, cts.Token);
+        bool drainTookTheStart;
+        lock (drainSeen)
+        {
+            drainTookTheStart = drainSeen.Contains(MsgKind.RecordingStart) && !drainSeen.Contains(MsgKind.Rematch);
+        }
+
+        Check("the first file frame read after this side's own halt is drained to its handler, not dropped, and a Rematch behind it still is",
+              drainHost.Halted && drainTookTheStart);
+
+        var closeLines = new Relay();
+        var closeAt = new DateTime(2026, 9, 24, 12, 0, 0, DateTimeKind.Utc);
+        var unseatedClose = closeLines.CloseLine(-1, closeAt);
+        Check("the relay names a connection that closed before taking a seat, and never prints seat -1",
+              unseatedClose == "  a connection closed before it took a seat"
+              && closeLines.CloseLine(1, closeAt) == "  peer disconnected (seat 1)"
+              && unseatedClose?.Contains("-1") == false);
+
+        var tally = new Relay();
+        var tallyStart = new DateTime(2026, 9, 24, 12, 0, 0, DateTimeKind.Utc);
+        var tallyFirst = tally.CloseLine(-1, tallyStart);
+        var tallyQuiet = 0;
+        var seatedEveryTime = true;
+        for (var i = 1; i <= 500; i++)
+        {
+            var tallyAt = tallyStart + TimeSpan.FromMilliseconds(i);
+            if (tally.CloseLine(-1, tallyAt) is not null)
+            {
+                tallyQuiet++;
+            }
+
+            if (tally.CloseLine(i % 2, tallyAt) != $"  peer disconnected (seat {i % 2})")
+            {
+                seatedEveryTime = false;
+            }
+        }
+
+        var tallyLater = tally.CloseLine(-1, tallyStart + Relay.UnseatedQuiet);
+        Check("connections that close before taking a seat print one relay line in ten seconds, carrying their count, while a seated peer's close prints every time",
+              tallyFirst == "  a connection closed before it took a seat" && tallyQuiet == 0 && seatedEveryTime
+              && tallyLater == "  501 connections closed before they took a seat");
+
         Check("a minted routing id is 16 hex characters and two mints differ",
               RoomId.Random().Length == 16 && RoomId.Random().All(Uri.IsHexDigit)
               && RoomId.Random() != RoomId.Random());
@@ -463,6 +540,33 @@ internal static partial class Program
               Relay.BindFor(null, tunnel: true).Equals(IPAddress.Loopback)
               && Relay.BindFor(null, tunnel: false).Equals(IPAddress.Any)
               && Relay.BindFor("0.0.0.0", tunnel: true).Equals(IPAddress.Any));
+
+        var backlogRelay = new Relay(onlyRoom: "BACKRM");
+        var backlog = new TcpListener(IPAddress.Loopback, 0);
+        backlog.Start();
+        var backlogEnd = (IPEndPoint)backlog.LocalEndpoint;
+        var droppedFirst = new TcpClient(AddressFamily.InterNetwork);
+        await droppedFirst.ConnectAsync(backlogEnd, cts.Token);
+        droppedFirst.Client.Close(0);
+        using var behindIt = new TcpClient(AddressFamily.InterNetwork);
+        await behindIt.ConnectAsync(backlogEnd, cts.Token);
+        await Task.Delay(100, cts.Token);
+        _ = backlogRelay.AcceptAll(backlog, cts.Token);
+        var behindItSeated = false;
+        try
+        {
+            var behindItWriter = new StreamWriter(behindIt.GetStream(), new UTF8Encoding(false)) { AutoFlush = true };
+            await behindItWriter.WriteLineAsync(Protocol.Encode(new Frame { Kind = MsgKind.Hello, Room = "BACKRM", Seat = 0 }));
+            behindItSeated = await Until(() => backlogRelay.Seated((IPEndPoint)behindIt.Client.LocalEndPoint!),
+                                         cts.Token, 2000);
+        }
+        catch (IOException)
+        {
+        }
+
+        Check("the relay goes on accepting past a connection reset while it waited to be accepted",
+              behindItSeated);
+        droppedFirst.Dispose();
         var oldEnough = TunnelClient.ForwardPool.EvictionGrace + TimeSpan.FromSeconds(1);
         var grace = TunnelClient.ForwardPool.EvictionGrace;
         TimeSpan[] threeOld = [oldEnough, oldEnough, oldEnough];
@@ -476,6 +580,12 @@ internal static partial class Program
               TunnelClient.ForwardPool.Evict([false, false], [TimeSpan.Zero, TimeSpan.Zero], grace) == -1
               && TunnelClient.ForwardPool.Evict([false, false], [TimeSpan.Zero, oldEnough], grace) == 1
               && TunnelClient.ForwardPool.Evict([false, false], [oldEnough, TimeSpan.Zero], grace) == 0);
+
+        var guestHelloBack = TimeSpan.FromSeconds(1);
+        var guestSeatedBy = TunnelClient.NetworkTimeout + guestHelloBack;
+        Check("an unseated tunnel slot can be given up once a third of the relay's Hello deadline has passed, and is kept through its forward's dial plus one second for the guest's Hello to come back",
+              TunnelClient.ForwardPool.Evict([false], [Relay.HelloWithin / 3], TunnelClient.ForwardPool.EvictionGrace) == 0
+              && TunnelClient.ForwardPool.Evict([false], [guestSeatedBy], TunnelClient.ForwardPool.EvictionGrace) == -1);
 
         var slotRelay = new Relay(onlyRoom: "SLOTRM");
         var slotPort = FreeLoopbackPort();
@@ -597,10 +707,26 @@ internal static partial class Program
               requiring.Halted && requiring.HaltReason?.Contains("not bound to the session") == true);
 
         Check("D-219: both ends of a channel bind to the same value, and a moved-on channel binds nothing",
-              sepA.BindToChannel(sepA.ChannelGeneration) is { } boundOne
-              && sepB.BindToChannel(sepB.ChannelGeneration) is { } boundTwo
+              sepA.BindToChannel(sepA.ChannelGeneration, sepA.Fingerprint) is { } boundOne
+              && sepB.BindToChannel(sepB.ChannelGeneration, sepB.Fingerprint) is { } boundTwo
               && boundOne.SequenceEqual(boundTwo)
-              && sepA.BindToChannel(sepA.ChannelGeneration + 1) is null);
+              && sepA.BindToChannel(sepA.ChannelGeneration + 1, sepA.Fingerprint) is null);
+
+        Check("a bind names the code it compared, so the channel in use under another code binds nothing",
+              sepA.BindToChannel(sepA.ChannelGeneration, "0000000000000000") is null
+              && sepA.BindToChannel(sepA.ChannelGeneration, null) is null
+              && sepA.BindToChannel(sepA.ChannelGeneration, sepA.Fingerprint) is not null);
+
+        var shownOnSep = sepA.Fingerprint;
+        var movedLobby = new Lobby("S", isHost: true);
+        var sentOnMoved = ConfirmCode(sepA, movedLobby, shownOnSep, (shownOnSep, sepA.ChannelGeneration + 1));
+        movedLobby.ConfirmedByPeer(sepA.ChannelGeneration + 1, movedLobby.SetupDigest(), movedLobby.SetupDigest());
+        var keptLobby = new Lobby("S", isHost: true);
+        var sentOnShown = ConfirmCode(sepA, keptLobby, shownOnSep, (shownOnSep, sepA.ChannelGeneration));
+        keptLobby.ConfirmedByPeer(sepA.ChannelGeneration, keptLobby.SetupDigest(), keptLobby.SetupDigest());
+        Check("a confirmation goes out only on the channel whose code was compared, and otherwise records nothing",
+              !sentOnMoved && movedLobby.BindingChannel(shownOnSep, sepA.ChannelGeneration + 1) is null
+              && sentOnShown && keptLobby.BindingChannel(shownOnSep, sepA.ChannelGeneration) == sepA.ChannelGeneration);
 
         Check("D-219: a lobby binds only when both confirmations stand on the channel in use",
               Lobby.BindingDue(1, 1, 1) && !Lobby.BindingDue(1, 1, 2) && !Lobby.BindingDue(1, 2, 2)
@@ -619,17 +745,27 @@ internal static partial class Program
         await Until(() => hostPeer.Fingerprint is not null && guestPeer.Fingerprint is not null, cts.Token);
         var bindHostLobby = new Lobby("B", isHost: true);
         var bindGuestLobby = new Lobby("B", isHost: false);
-        bindHostLobby.ConfirmedLocally(hostPeer.ChannelGeneration);
-        bindGuestLobby.ConfirmedByPeer(guestPeer.ChannelGeneration);
+        bindHostLobby.ConfirmedLocally(hostPeer.ChannelGeneration, hostPeer.Fingerprint!);
+        bindGuestLobby.ConfirmedByPeer(guestPeer.ChannelGeneration, bindHostLobby.SetupDigest(),
+                                       bindGuestLobby.SetupDigest());
         BindIfBothConfirmed(hostPeer, bindHostLobby);
         var hostUnboundAfterOne = hostPeer.Binding is null;
-        bindGuestLobby.ConfirmedLocally(guestPeer.ChannelGeneration);
-        bindHostLobby.ConfirmedByPeer(hostPeer.ChannelGeneration);
+        bindGuestLobby.ConfirmedLocally(guestPeer.ChannelGeneration, guestPeer.Fingerprint!);
+        bindHostLobby.ConfirmedByPeer(hostPeer.ChannelGeneration, bindGuestLobby.SetupDigest(),
+                                      bindHostLobby.SetupDigest());
         BindIfBothConfirmed(hostPeer, bindHostLobby);
         BindIfBothConfirmed(guestPeer, bindGuestLobby);
         Check("D-219: two lobbies bind once both have confirmed, and to the same value",
               hostUnboundAfterOne && hostPeer.Binding is { } hostBinding && guestPeer.Binding is { } guestBinding
-              && hostBinding.SequenceEqual(guestBinding));
+              && hostBinding.SequenceEqual(guestBinding)
+              && bindHostLobby.BoundSetup is not null && bindGuestLobby.BoundSetup is not null);
+
+        var (retryHost, retryGuest) = AgreedLobbies([.. new int[30]]);
+        var retryChannel = hostPeer.ChannelGeneration;
+        retryHost.ConfirmedLocally(retryChannel, hostPeer.Fingerprint!);
+        retryHost.ConfirmedByPeer(retryChannel, retryGuest.SetupDigest(), retryHost.SetupDigest());
+        BindIfBothConfirmed(hostPeer, retryHost);
+        var firstWrite = LobbyWrite(hostPeer, retryHost, "live-probe", yes: false);
 
         var lobbyCode = hostPeer.Fingerprint;
         guestLife.Cancel();
@@ -645,6 +781,12 @@ internal static partial class Program
         Check("D-219: the other PC's --play, handed the binding, pairs with the bound lobby on it",
               guestPlay.Fingerprint == hostPeer.Fingerprint && !guestPlay.Halted && !hostPeer.Halted
               && hostPeer.Binding is not null);
+
+        LobbyHeardLeft(retryHost);
+        var retryWrite = LobbyWrite(hostPeer, retryHost, "live-probe", yes: false);
+        Check("a write that stopped at a game step runs again once the other PC's lobby has left and its --play holds the bound session, through the same gates",
+              firstWrite == 0 && retryWrite == 0 && !hostPeer.Halted && hostPeer.Binding is not null
+              && hostPeer.ChannelGeneration != retryChannel && retryHost.BothReady && retryHost.BoundSetup is not null);
 
         var oldCode = hostPeer.Fingerprint;
         playLife.Cancel();
@@ -1074,13 +1216,13 @@ internal static partial class Program
 
         Check("a multi-action turn becomes ONE --script-turn call, not one --script-move each",
               new Injector("live-probe.exe", armed: false) is var inj &&
-              inj.Apply(twoTurn, CancellationToken.None).Result &&
+              inj.Apply(twoTurn).Result &&
               inj.LastCommand!.Contains("--script-turn") &&
               !inj.LastCommand.Contains("--script-move"));
 
         Check("a single-action turn still uses --script-move",
               new Injector("live-probe.exe", armed: false) is var inj1 &&
-              inj1.Apply(r1.Moves, CancellationToken.None).Result &&
+              inj1.Apply(r1.Moves).Result &&
               inj1.LastCommand!.Contains("--script-move"));
 
         Check("the final flag survives the wire on a Move frame",
@@ -1093,24 +1235,24 @@ internal static partial class Program
 
         Check("a match-ending turn becomes --script-turn --final",
               new Injector("live-probe.exe", armed: false) is var injF &&
-              injF.Apply(twoTurn, final: true, CancellationToken.None).Result &&
+              injF.Apply(twoTurn, final: true).Result &&
               injF.LastCommand!.Contains("--script-turn") &&
               injF.LastCommand.Contains("--final"));
 
         Check("a one-action match-ending turn also carries --final, on the --script-move path",
               new Injector("live-probe.exe", armed: false) is var injF1 &&
-              injF1.Apply(r1.Moves, final: true, CancellationToken.None).Result &&
+              injF1.Apply(r1.Moves, final: true).Result &&
               injF1.LastCommand!.Contains("--script-move") &&
               injF1.LastCommand.Contains("--final"));
 
         Check("an ordinary turn never carries --final",
               new Injector("live-probe.exe", armed: false) is var injN &&
-              injN.Apply(twoTurn, final: false, CancellationToken.None).Result &&
+              injN.Apply(twoTurn, final: false).Result &&
               !injN.LastCommand!.Contains("--final"));
 
         Check("an attack in a multi-action turn sends the VICTIM's tile, not the destination",
               new Injector("live-probe.exe", armed: false) is var inj2 &&
-              inj2.Apply([r3.Moves[0], r1.Moves[0]], CancellationToken.None).Result &&
+              inj2.Apply([r3.Moves[0], r1.Moves[0]]).Result &&
               inj2.LastCommand!.Contains("attack,6,1,6,2,"));
 
         Check("an attack spec carries the standing square as the from pair",
@@ -1118,7 +1260,7 @@ internal static partial class Program
 
         Check("a single-action attack carries the standing square as --from",
               new Injector("live-probe.exe", armed: false) is var injFrom &&
-              injFrom.Apply([r3.Moves[0]], CancellationToken.None).Result &&
+              injFrom.Apply([r3.Moves[0]]).Result &&
               injFrom.LastCommand!.Contains("--attack") &&
               injFrom.LastCommand.Contains("--from 6 1"));
 
@@ -1208,7 +1350,7 @@ internal static partial class Program
 
         Check("a burst attack spec keeps the burst as the field after the from pair",
               new Injector("live-probe.exe", armed: false) is var injBurstFrom &&
-              injBurstFrom.Apply([rb4.Moves[0], r1.Moves[0]], CancellationToken.None).Result &&
+              injBurstFrom.Apply([rb4.Moves[0], r1.Moves[0]]).Result &&
               injBurstFrom.LastCommand!.Contains("attack,6,1,6,2,2,6,1,burst"));
 
         var burstNoAction = b0 with
@@ -1231,12 +1373,12 @@ internal static partial class Program
 
         Check("a single bursting action arms --script-move --burst",
               new Injector("live-probe.exe", armed: false) is var inj3 &&
-              inj3.Apply(rb1.Moves, CancellationToken.None).Result &&
+              inj3.Apply(rb1.Moves).Result &&
               inj3.LastCommand!.Contains("--script-move") && inj3.LastCommand.Contains("--burst"));
 
         Check("in a multi-action turn only the bursting action carries the 7th field",
               new Injector("live-probe.exe", armed: false) is var inj4 &&
-              inj4.Apply([twoTurn[0], rb1.Moves[0]], CancellationToken.None).Result &&
+              inj4.Apply([twoTurn[0], rb1.Moves[0]]).Result &&
               inj4.LastCommand!.Contains("move,6,1,6,0,2,burst") &&
               inj4.LastCommand.Split(",burst").Length == 2);
 
@@ -1319,29 +1461,6 @@ internal static partial class Program
               !NewMatchAfterOver(overScreen) && NewMatchAfterOver(retried) && NewMatchAfterOver(placingAgain)
               && !NewMatchAfterOver(Frame()));
 
-        var sept30 = new DateOnly(2026, 9, 30);
-        Check("a test build's mark names the tester and never the date, and its expiry reads the same here as in the launcher",
-              TestBuild.Mark("Jane", sept30) == "private test build for Jane"
-              && TestBuild.Mark(null, null) is null
-              && !TestBuild.Expired(sept30, sept30) && TestBuild.Expired(sept30, sept30.AddDays(1))
-              && !TestBuild.Expired(null, sept30.AddYears(10))
-              && !TestBuild.ExpiredMessage().Contains(';') && !TestBuild.ExpiredMessage().Contains("2026"));
-
-        var testLobby = new Lobby("B", isHost: true, localNetplay: "N", localProbe: "P", localExpires: sept30,
-                                  localDay: sept30);
-        var onTime = new Frame { Kind = MsgKind.Ident, Build = "B", NetplayVersion = "N", ProbeVersion = "P", Day = "2026-09-30" };
-        var late = new Frame { Kind = MsgKind.Ident, Build = "B", NetplayVersion = "N", ProbeVersion = "P", Day = "2026-10-01" };
-        var noDay = new Frame { Kind = MsgKind.Ident, Build = "B", NetplayVersion = "N", ProbeVersion = "P" };
-        var publicLobby = new Lobby("B", isHost: true, localNetplay: "N", localProbe: "P");
-        Check("a test build refuses a peer whose date is past its expiry, or who sends none, and a public build ignores the date",
-              testLobby.OnIdent(onTime) is null
-              && new Lobby("B", isHost: true, localNetplay: "N", localProbe: "P", localExpires: sept30).OnIdent(late) == TestBuild.ExpiredMessage()
-              && new Lobby("B", isHost: true, localNetplay: "N", localProbe: "P", localExpires: sept30).OnIdent(noDay) == TestBuild.ExpiredMessage()
-              && publicLobby.OnIdent(late) is null
-              && testLobby.Ident().Day == "2026-09-30"
-              && TestBuild.DayPast(sept30, "2026-09-30") is false && TestBuild.DayPast(sept30, "2026-10-01")
-              && TestBuild.DayPast(sept30, "October 1") && TestBuild.DayPast(sept30, null));
-
         var home = @"C:\Games\Strikers\";
         var ownExe = home + "netplay.exe";
         var noon = new DateTime(2026, 9, 13, 12, 0, 0, DateTimeKind.Utc);
@@ -1370,6 +1489,7 @@ internal static partial class Program
         lock (_placementLock)
         {
             _writtenSlots.Add(7);
+            _writtenSquares.Add((3, 6));
         }
 
         using (var lockHeld = new ManualResetEventSlim())
@@ -1393,12 +1513,86 @@ internal static partial class Program
             bool cleared;
             lock (_placementLock)
             {
-                cleared = _writtenSlots.Count == 0 && _releasedPlacements == 0;
+                cleared = _writtenSlots.Count == 0 && _writtenSquares.Count == 0 && _releasedPlacements == 0;
             }
 
             Check("a rematch's reset and the peer frame gate both wait for a placement write in progress",
                   waitedForLock && finished && cleared);
         }
+
+        static (int Width, int Height)? EightByEight()
+        {
+            return (8, 8);
+        }
+
+        var placeOnes = new List<string[]>();
+        int PlaceOneWrites(string[] probeArgs)
+        {
+            placeOnes.Add(probeArgs);
+            return 0;
+        }
+
+        var snapBeforePlacements = _lastSnap;
+        _lastSnap = null;
+        var placingPeer = new Peer("127.0.0.1", 1, "WRITE1", 0);
+        lock (_placementLock)
+        {
+            WritePlacement(placingPeer, new Frame { Kind = MsgKind.Place, PlaceIdx = 2, Place = new Placement { X = 4, Y = 6 } },
+                           EightByEight, PlaceOneWrites);
+        }
+
+        var sameSquareGated = GatePeerFrame(new Frame
+        {
+            Kind = MsgKind.Place, PlaceIdx = 5, Place = new Placement { X = 4, Y = 6 },
+        });
+        var otherSquareGated = GatePeerFrame(new Frame
+        {
+            Kind = MsgKind.Place, PlaceIdx = 5, Place = new Placement { X = 5, Y = 6 },
+        });
+        ResetPlacementBookkeeping();
+
+        var wasAutoHeld = _auto;
+        var wasOffHeld = _autoOffByUser;
+        _auto = false;
+        _autoOffByUser = false;
+        var releaser = new Peer("127.0.0.1", 1, "WRITE2", 0);
+        ReceivePlacement(releaser, "strikers-no-such-live-probe.exe",
+                         new Frame { Kind = MsgKind.Place, PlaceIdx = 0, Place = new Placement { X = 2, Y = 7 } });
+        ReceivePlacement(releaser, "strikers-no-such-live-probe.exe",
+                         new Frame { Kind = MsgKind.Place, PlaceIdx = 1, Place = new Placement { X = 2, Y = 7 } });
+        _auto = wasAutoHeld;
+        _autoOffByUser = wasOffHeld;
+        ReleaseHeldPlacements(releaser, EightByEight, PlaceOneWrites);
+        ResetPlacementBookkeeping();
+        Check("a placement written through the session is recorded by the square the other side sent, and the peer " +
+              "frame gate then refuses that square, for a placement written at once and for two released after waiting",
+              placeOnes.Count == 2
+              && sameSquareGated is { } writtenSquare && writtenSquare.Contains("(4,6)")
+              && writtenSquare.Contains("already placed")
+              && (otherSquareGated is null || !otherSquareGated.Contains("already placed"))
+              && releaser.Halted && releaser.HaltReason is { } releasedTwice && releasedTwice.Contains("(2,7)")
+              && releasedTwice.Contains("already placed"));
+
+        lock (_placementLock)
+        {
+            _writtenSquares.Add((4, 6));
+        }
+
+        var wasAuto = _auto;
+        var wasOffByUser = _autoOffByUser;
+        _auto = true;
+        _autoOffByUser = false;
+        var regated = new Peer("127.0.0.1", 1, "REGATE", 0);
+        ReceivePlacement(regated, Path.Combine(Path.GetTempPath(), "strikers-no-such-live-probe.exe"),
+                         new Frame { Kind = MsgKind.Place, PlaceIdx = 6, Place = new Placement { X = 4, Y = 6 } });
+        _auto = wasAuto;
+        _autoOffByUser = wasOffByUser;
+        ResetPlacementBookkeeping();
+        _lastSnap = snapBeforePlacements;
+        Check("a placement written the moment it arrives is gated again under the placement lock, so a square written " +
+              "since it passed the gate is refused",
+              regated.Halted && regated.HaltReason is { } regate && regate.Contains("(4,6)")
+              && regate.Contains("already placed"));
 
         static Piece Pc(int idx, int x, int y, int hp, int facing, int owner, int acts = 0, int bursts = 0,
                         bool burst = false, int skill = -1, int range = -1, string uuid = "")
@@ -1977,6 +2171,216 @@ internal static partial class Program
               CommitTranscript.ToMoves(diveThenMove, 0)
                   is { Refusal: null, NotCovered: null,
                        Moves: [{ Attack: true, DstX: 2, DstY: 2, AtkX: 2, AtkY: 3 }, { Attack: false, DstX: 1, DstY: 2 }] });
+
+        const string chargerUuid = "FDC39FDFF4CE9C5B8190CE46AAFCF7B5";
+        static List<BoardSnapshot> Charged(string uuid, int landX, int landY)
+        {
+            return
+            [
+                WithCommits(Frame(Pc(0, 4, 4, 3, 2, 0, range: 2, uuid: uuid), Pc(1, 3, 4, 4, 2, 1, range: 2, uuid: chargerUuid),
+                                  Pc(2, 3, 3, 3, 2, 0, range: 2, uuid: chargerUuid), Pc(3, 4, 5, 4, 2, 1, range: 2, uuid: chargerUuid))),
+                WithCommits(Frame(Pc(0, landX, landY, 3, 2, 0, range: 2, uuid: uuid), Pc(1, 3, 4, 4, 2, 1, range: 2, uuid: chargerUuid),
+                                  Pc(2, 3, 3, 3, 2, 0, range: 2, uuid: chargerUuid), Pc(3, 4, 5, 4, 2, 1, range: 2, uuid: chargerUuid)),
+                            Rec(9, "activate", "BEEF", 4, 4, 4, 4),
+                            Rec(10, "attack", "BEEF", 4, 4, 4, 4)),
+                WithCommits(Frame(Pc(0, landX, landY, 3, 2, 0, range: 2, uuid: uuid), Pc(1, 3, 4, 4, 2, 1, range: 2, uuid: chargerUuid),
+                                  Pc(2, 3, 3, 3, 2, 0, range: 2, uuid: chargerUuid), Pc(3, 4, 5, 0, 2, 1, range: 2, uuid: chargerUuid))),
+                WithCommits(Frame(Pc(0, landX, landY, 3, 2, 0, range: 2, uuid: uuid), Pc(1, 3, 4, 4, 2, 1, range: 2, uuid: chargerUuid),
+                                  Pc(2, 3, 3, 3, 2, 0, range: 2, uuid: chargerUuid))),
+            ];
+        }
+
+        const string burrowerUuid = "1C96A39FFE37791F8AE07BD49A2230FF";
+        List<BoardSnapshot> rotatedAfterLanding =
+        [
+            WithCommits(Frame(Pc(0, 2, 2, 4, 0, 0, uuid: burrowerUuid), Pc(1, 1, 1, 2, 0, 1, uuid: burrowerUuid))),
+            WithCommits(Frame(Pc(0, 2, 2, 4, 0, 0, uuid: burrowerUuid), Pc(1, 1, 1, 2, 0, 1, uuid: burrowerUuid)),
+                        Rec(5, "activate", "BEEF", 1, 0, 0, 0),
+                        Rec(6, "move", "BEEF", 2, 2, 3, 2)),
+            WithCommits(Frame(Pc(0, 3, 2, 4, 0, 0, uuid: burrowerUuid), Pc(1, 1, 1, 2, 0, 1, uuid: burrowerUuid))),
+            WithCommits(Frame(Pc(0, 3, 2, 4, 1, 0, acts: 1, uuid: burrowerUuid), Pc(1, 1, 1, 2, 0, 1, uuid: burrowerUuid))),
+            WithCommits(Frame(Pc(0, 3, 2, 4, 1, 0, uuid: burrowerUuid), Pc(1, 1, 1, 2, 0, 1, uuid: burrowerUuid))),
+        ];
+        Check("a move's facing is read once the machine's own counter has ticked on the landing, not from its first sample there",
+              CommitTranscript.ToMoves(rotatedAfterLanding, 0)
+                  is { Refusal: null, NotCovered: null, Moves: [{ Attack: false, DstX: 3, DstY: 2, Facing: 1 }] });
+
+        const string rockbreakerUuid = "ADEA18E33DA2CAF15010D29CA12FE1F3";
+        const string dreadwingUuid = "435534A445562BA16633AF4B908D83B2";
+        List<BoardSnapshot> turnedAndShot =
+        [
+            WithCommits(Frame(Pc(0, 7, 3, 3, 2, 0, range: 2, uuid: rockbreakerUuid), Pc(1, 5, 3, 9, 0, 1, range: 3, uuid: dreadwingUuid))),
+            WithCommits(Frame(Pc(0, 7, 3, 3, 3, 0, range: 2, uuid: rockbreakerUuid), Pc(1, 5, 3, 9, 0, 1, range: 3, uuid: dreadwingUuid))),
+            WithCommits(Frame(Pc(0, 7, 3, 3, 0, 0, range: 2, uuid: rockbreakerUuid), Pc(1, 5, 3, 9, 0, 1, range: 3, uuid: dreadwingUuid)),
+                        Rec(59, "activate", "BEEF", 7, 3, 7, 3),
+                        Rec(60, "attack", "BEEF", 7, 3, 7, 3)),
+            WithCommits(Frame(Pc(0, 7, 3, 3, 3, 0, range: 2, uuid: rockbreakerUuid), Pc(1, 5, 3, 9, 0, 1, range: 3, uuid: dreadwingUuid))),
+            WithCommits(Frame(Pc(0, 7, 3, 3, 3, 0, range: 2, uuid: rockbreakerUuid), Pc(1, 5, 3, 4, 0, 1, range: 3, uuid: dreadwingUuid))),
+            WithCommits(Frame(Pc(0, 7, 3, 3, 3, 0, range: 2, uuid: rockbreakerUuid), Pc(1, 5, 3, 4, 0, 1, range: 3, uuid: dreadwingUuid))),
+        ];
+        Check("D-290: an attack's facing is the attacker's on the sample where its victim first loses health, not on the "
+              + "sample where the game's record first appears",
+              CommitTranscript.ToMoves(turnedAndShot, 0)
+                  is { Refusal: null, NotCovered: null,
+                       Moves: [{ Attack: true, DstX: 7, DstY: 3, Facing: 3, TargetX: 5, TargetY: 3 }] }
+              && CommitTranscript.FacingOf(turnedAndShot[4], 0, 7, 3, rockbreakerUuid) == 3
+              && CommitTranscript.FacingOf(turnedAndShot[4], 0, 7, 3, dreadwingUuid) is null
+              && CommitTranscript.FacingOf(turnedAndShot[4], 0, 6, 3, "") is null);
+
+        Check("D-291: after a halt the samples are still captured and no longer read, even when the halt switched auto off",
+              CapturesSample(auto: true, tracking: true, halted: true)
+              && CapturesSample(auto: false, tracking: true, halted: true)
+              && CapturesSample(auto: true, tracking: true, halted: false)
+              && !CapturesSample(auto: false, tracking: true, halted: false)
+              && !CapturesSample(auto: true, tracking: false, halted: true)
+              && ReadsSample(auto: true, tracking: true, halted: false)
+              && !ReadsSample(auto: true, tracking: true, halted: true)
+              && !ReadsSample(auto: false, tracking: true, halted: true));
+
+        string[] gameLogTail =
+        [
+            "12:00:00:000 (00001000) > [Render] Working set: 8000MB fps: 60.000000",
+            "12:00:40:000 (00001001) > [D3D] rb_resource_data.mAllocation.GetD3DResource().Map(0, &range) failed with HRESULT 2289696773 (0x887a0005)",
+            "12:00:40:000 (00001002) > [D3D] ERROR! Device removed detected (0x887A0006: DXGI_ERROR_DEVICE_HUNG)",
+            "12:00:40:000 (00001002) > [D3D] save under C:\\Users\\someone\\Documents\\76561198000000000",
+            "12:00:40:000 (00001002) > [D3D] account 76561198000000000 lost its device",
+            "12:00:40:000 (00001002) > [D3D] GPU temperature: 51 Celsius",
+        ];
+        var gameLog = AfterHalt.GameLogLines(gameLogTail);
+        Check("D-291: after a halt the heartbeat names the time and the game's memory, an exit names its code, and only "
+              + "the game log's Direct3D lines cross, with no path and no long number",
+              AfterHalt.BeatLine(TimeSpan.FromSeconds(45), 8000L * 1024 * 1024, 3)
+                  == "  after the stop, 45 s: the game runs, working set 8000 MB, 3 live-probe helper(s) running"
+              && AfterHalt.ExitLine(TimeSpan.FromSeconds(205), -1073741819)
+                  == "  after the stop, 3 min 25 s: the game exited, code 0xC0000005"
+              && AfterHalt.ExitLine(TimeSpan.Zero, null).EndsWith("code unknown")
+              && AfterHalt.BeatDue(TimeSpan.FromSeconds(15), TimeSpan.Zero)
+              && !AfterHalt.BeatDue(TimeSpan.FromSeconds(14), TimeSpan.Zero)
+              && !AfterHalt.BeatDue(TimeSpan.FromMinutes(11), TimeSpan.FromMinutes(10))
+              && gameLog.Count == 4
+              && gameLog.Any(l => l.Contains("DXGI_ERROR_DEVICE_HUNG"))
+              && gameLog.Any(l => l.Contains("account * lost its device"))
+              && !gameLog.Any(l => l.Contains("[Render]") || l.Contains(":\\") || l.Contains("76561198"))
+              && AfterHalt.GameLogLines(Enumerable.Repeat("[D3D] x", 20)).Count == AfterHalt.GameLogLinesKept);
+
+        var afterStop = AfterHalt.ExitLines(TimeSpan.Zero, null, gameLogTail);
+        Check("no line written after a stop says halt, so the launcher cannot read one as a second halt",
+              !AfterHalt.BeatLine(TimeSpan.FromSeconds(45), 1024L * 1024, 3).Contains("halt", StringComparison.OrdinalIgnoreCase)
+              && !afterStop.Any(l => l.Contains("halt", StringComparison.OrdinalIgnoreCase)));
+
+        Check("a game already gone at the stop still gets its game log's Direct3D lines after the exit line",
+              afterStop.Count == 5
+              && afterStop[0].EndsWith("the game exited, code unknown")
+              && afterStop.Skip(1).All(l => l.StartsWith("    game log: ")));
+
+        var controlled = AfterHalt.GameLogLines(["[D3D] a" + (char)0x1B + "[2Jb" + (char)0x0D + "c" + (char)0x07 + "d"]);
+        Check("a game log line reaches the console with its control characters dropped",
+              controlled.Count == 1
+              && !controlled[0].Any(char.IsControl)
+              && controlled[0] == "[D3D] a[2Jbcd");
+
+        Check("a game log line holding a network path or any backslash stays on this PC",
+              AfterHalt.GameLogLines(["[D3D] shader cache on " + @"\\host\share\cache", "[D3D] cache at " + @"Users\someone\x"]).Count == 0
+              && AfterHalt.GameLogLines(["[D3D] ERROR! Device removed detected"]).Count == 1);
+
+        var startFault = new System.ComponentModel.Win32Exception(5,
+            @"An error occurred trying to start process 'live-probe.exe' with working directory 'C:\Users\someone\Desktop'.");
+        Check("a live-probe that could not start is named with the fault's kind, never its message, which carries a folder",
+              StartFailedLine("live-probe.exe --hold", startFault) == "  could not start live-probe.exe --hold (Win32Exception)"
+              && !StartFailedLine("live-probe.exe --hold", startFault).Contains("Users"));
+
+        Check("a sample is still captured after a halt that switched auto off, and read only while auto is on",
+              SampleGoesToAuto(auto: false, tracking: true, halted: true)
+              && SampleGoesToAuto(auto: true, tracking: true, halted: false)
+              && !SampleGoesToAuto(auto: false, tracking: true, halted: false)
+              && !SampleGoesToAuto(auto: false, tracking: false, halted: true));
+
+        Check("the settled landing is the first sample whose counter moved, and the first sample when none does",
+              CommitTranscript.SettledLanding(rotatedAfterLanding, 0, 3, 2, 2, 4) == 3
+              && CommitTranscript.SettledLanding(rotatedAfterLanding, 0, 3, 2, 2, 2) == 2
+              && CommitTranscript.SettledLanding(rotatedAfterLanding, 0, 1, 1, 2, 4) == 2);
+
+        List<BoardSnapshot> walkedThenCharged =
+        [
+            WithCommits(Frame(Pc(0, 1, 0, 4, 0, 0, range: 2, uuid: chargerUuid), Pc(1, 3, 1, 2, 2, 1, range: 2, uuid: chargerUuid))),
+            WithCommits(Frame(Pc(0, 1, 0, 4, 0, 0, range: 2, uuid: chargerUuid), Pc(1, 3, 1, 2, 2, 1, range: 2, uuid: chargerUuid)),
+                        Rec(19, "activate", "BEEF", 1, 0, 1, 0),
+                        Rec(20, "attack", "BEEF", 1, 0, 3, 0)),
+            WithCommits(Frame(Pc(0, 3, 0, 4, 0, 0, range: 2, uuid: chargerUuid), Pc(1, 3, 1, 2, 2, 1, range: 2, uuid: chargerUuid))),
+            WithCommits(Frame(Pc(0, 3, 0, 4, 2, 0, range: 2, uuid: chargerUuid), Pc(1, 3, 1, 2, 2, 1, range: 2, uuid: chargerUuid))),
+            WithCommits(Frame(Pc(0, 3, 2, 4, 2, 0, range: 2, uuid: chargerUuid), Pc(1, 3, 1, 0, 2, 1, range: 2, uuid: chargerUuid))),
+            WithCommits(Frame(Pc(0, 3, 2, 4, 2, 0, acts: 1, range: 2, uuid: chargerUuid))),
+        ];
+        Check("a Dash that walked to its strike square and charged is read from the end of the charge, not from the walk's landing",
+              CommitTranscript.ToMoves(walkedThenCharged, 0)
+                  is { Refusal: null, NotCovered: null,
+                       Moves: [{ Attack: true, SrcX: 1, SrcY: 0, DstX: 3, DstY: 0, Facing: 2, TargetX: 3, TargetY: 1, LandX: 3, LandY: 2 }] });
+
+        var walkCharge = new Move
+        {
+            SrcX = 1, SrcY = 0, DstX = 3, DstY = 0, TargetX = 3, TargetY = 1,
+            Facing = 2, Attack = true, LandX = 3, LandY = 2,
+        };
+        var walkBoard = new BoardSnapshot(4, 4,
+            [
+                new Piece(1, 0, 4, 0, 1) { Uuid = chargerUuid, Range = 2 },
+                new Piece(3, 1, 2, 2, 0) { Uuid = chargerUuid, Range = 2 },
+            ], []) { AiSeat = 1 };
+        Check("a charge that follows a walk is measured from the strike square, not from where the walk began",
+              Machines.TurnProblem([walkCharge], walkBoard, 1) is null
+              && Machines.TurnProblem([Landing(walkCharge, 1, 2)], walkBoard, 1) is { } walkWrong
+              && walkWrong.Contains("charge"));
+
+        const string redeyeUuid = "0E44B98882BA9AFD876C0DB6144D35F5";
+        const string tjawUuid = "F9433C1448F8F052BD457978CD0BFEC5";
+        List<BoardSnapshot> overchargeMoveDeath =
+        [
+            WithCommits(Frame(Pc(0, 5, 5, 2, 0, 0, uuid: redeyeUuid), Pc(1, 0, 7, 4, 0, 0, uuid: chargerUuid), Pc(2, 5, 0, 5, 2, 1, uuid: tjawUuid))),
+            WithCommits(Frame(Pc(0, 5, 6, 2, 0, 0, acts: 1, uuid: redeyeUuid), Pc(1, 0, 7, 4, 0, 0, uuid: chargerUuid), Pc(2, 5, 0, 5, 2, 1, uuid: tjawUuid)),
+                        Rec(29, "activate", "BEEF", 5, 5, 5, 5),
+                        Rec(30, "move", "BEEF", 5, 5, 5, 6)),
+            WithCommits(Frame(Pc(0, 5, 6, 2, 0, 0, acts: 1, uuid: redeyeUuid), Pc(1, 0, 7, 4, 0, 0, uuid: chargerUuid), Pc(2, 5, 0, 5, 2, 1, uuid: tjawUuid)),
+                        Rec(31, "burst", "BEEF", 5, 6, 5, 6)),
+            WithCommits(Frame(Pc(0, 5, 6, 2, 0, 0, acts: 1, uuid: redeyeUuid), Pc(1, 0, 7, 4, 0, 0, uuid: chargerUuid), Pc(2, 5, 0, 5, 2, 1, uuid: tjawUuid)),
+                        Rec(32, "move", "BEEF", 5, 6, 5, 7)),
+            WithCommits(Frame(Pc(0, 0, 7, 4, 0, 0, uuid: chargerUuid), Pc(1, 5, 0, 5, 2, 1, uuid: tjawUuid))),
+            WithCommits(Frame(Pc(0, 0, 7, 4, 0, 0, uuid: chargerUuid), Pc(1, 5, 0, 5, 2, 1, uuid: tjawUuid))),
+        ];
+        Check("an Overcharge move whose machine dies of the cost at its landing is read as that move, with the facing it kept",
+              CommitTranscript.ToMoves(overchargeMoveDeath, 0)
+                  is { Refusal: null, NotCovered: null,
+                       Moves: [{ Attack: false, DstX: 5, DstY: 6, Burst: false },
+                               { Attack: false, SrcX: 5, SrcY: 6, DstX: 5, DstY: 7, Facing: 0, Burst: true }] });
+
+        List<BoardSnapshot> victimInOwnSample =
+        [
+            WithCommits(Frame(Pc(0, 3, 4, 2, 0, 0, uuid: chargerUuid), Pc(1, 3, 1, 4, 2, 1, uuid: tjawUuid))),
+            WithCommits(Frame(Pc(0, 3, 4, 2, 0, 0, uuid: chargerUuid), Pc(1, 3, 1, 4, 2, 1, uuid: tjawUuid)),
+                        Rec(50, "activate", "BEEF", 3, 4, 3, 4)),
+            WithCommits(Frame(Pc(0, 3, 2, 2, 0, 0, uuid: chargerUuid), Pc(1, 3, 1, 4, 2, 1, uuid: tjawUuid)),
+                        Rec(51, "attack", "BEEF", 3, 4, 3, 2)),
+            WithCommits(Frame(Pc(0, 3, 2, 2, 0, 0, uuid: chargerUuid), Pc(1, 3, 1, 3, 2, 1, uuid: tjawUuid))),
+            WithCommits(Frame(Pc(0, 3, 2, 2, 0, 0, acts: 1, uuid: chargerUuid), Pc(1, 3, 1, 3, 2, 1, uuid: tjawUuid))),
+            WithCommits(Frame(Pc(0, 3, 2, 2, 0, 0, acts: 1, uuid: chargerUuid), Pc(1, 3, 1, 3, 2, 1, uuid: tjawUuid)),
+                        Rec(52, "burst", "BEEF", 3, 2, 3, 2)),
+            WithCommits(Frame(Pc(0, 3, 2, 2, 0, 0, acts: 1, bursts: 1, burst: true, uuid: chargerUuid), Pc(1, 3, 1, 2, 2, 1, uuid: tjawUuid)),
+                        Rec(53, "attack", "BEEF", 3, 2, 3, 2)),
+            WithCommits(Frame(Pc(0, 3, 2, 2, 0, 0, acts: 1, bursts: 1, burst: true, uuid: chargerUuid), Pc(1, 3, 1, 2, 2, 1, uuid: tjawUuid))),
+        ];
+        Check("a victim that loses health inside the attack record's own sample is still the attack's victim",
+              CommitTranscript.ToMoves(victimInOwnSample, 0)
+                  is { Refusal: null, NotCovered: null,
+                       Moves: [{ Attack: true, SrcX: 3, SrcY: 4, DstX: 3, DstY: 2, TargetX: 3, TargetY: 1, Burst: false },
+                               { Attack: true, SrcX: 3, SrcY: 2, DstX: 3, DstY: 2, TargetX: 3, TargetY: 1, Burst: true }] });
+
+        Check("join: a Dash whose kill ended the match crosses as its attack from the square it charged from",
+              CommitTranscript.ToMoves(Charged(chargerUuid, 4, 6), 0)
+                  is { Refusal: null, NotCovered: null,
+                       Moves: [{ Attack: true, SrcX: 4, SrcY: 4, DstX: 4, DstY: 4, Facing: 2, TargetX: 4, TargetY: 5 }] });
+        Check("join: a Dash off the end of its charge, or a machine that is not a Dash, is handed back, not a charge",
+              CommitTranscript.ToMoves(Charged(chargerUuid, 4, 7), 0) is { Refusal: null, NotCovered: not null, Moves: [] }
+              && CommitTranscript.ToMoves(Charged("2B34B3566FC1ED50071517AE89C5252F", 4, 6), 0)
+                  is { Refusal: null, NotCovered: not null, Moves: [] });
 
         Check("join: a shape the join does not cover is handed back to the board reader, not refused",
               CommitTranscript.ToMoves(
@@ -2617,6 +3021,26 @@ internal static partial class Program
               && StartClears.Any(c => c.SequenceEqual(["--patch-move-bounds", "--clear"]))
               && StartClears.Any(c => c.SequenceEqual(["--commit-ring", "--clear"])));
 
+        Check("live-probe's answer that it does not know the game build becomes the launcher's refusal line, " +
+              "keeping the build for the other PC, and no other answer does",
+              ProbeRefusedBuild(ProbeUnknownBuild) is { } unknownLine
+              && unknownLine.StartsWith("REFUSED: game build not supported: ", StringComparison.Ordinal)
+              && !unknownLine.Contains(';')
+              && new[] { 0, 1, 2, 5, 6, -1 }.All(code => ProbeRefusedBuild(code) is null)
+              && BuildFrom(ProbeUnknownBuild, "667B1778-949F000") == "667B1778-949F000"
+              && BuildFrom(0, "667B1777-949F000") == "667B1777-949F000"
+              && BuildFrom(1, "HorizonForbiddenWest.exe is not running.") == "unknown"
+              && BuildFrom(0, "") == "unknown");
+
+        Check("Set up the match answers a game build this Strikers does not know with its own refusal, even when " +
+              "the old build's offsets read as a live match, and says the game is still in a match only on a known one",
+              SetupRefusal(ProbeUnknownBuild, 0) == UnknownBuildRefusal
+              && SetupRefusal(ProbeUnknownBuild, 2) == UnknownBuildRefusal
+              && SetupRefusal(0, 0) == StillInMatch
+              && SetupRefusal(-1, 0) == StillInMatch
+              && SetupRefusal(0, 2) is null
+              && SetupRefusal(1, 1) is null);
+
         Check("a committed placement reports which machine it was",
               TurnBoundary.CommittedPlacements(
                   Frame(Pc(0, 3, 6, 5, 0, 0), Pc(2, 3, 7, 5, 0, 0) with { Uuid = "DDDD" })
@@ -2666,18 +3090,14 @@ internal static partial class Program
 
         var rectHost = new Lobby("B", isHost: true);
         rectHost.ChooseBoard([.. new int[40]], Preset.RuleNotSet, Preset.RuleNotSet, 5, 8, 2);
+        rectHost.SetArmy(["1C96A39FFE37791F8AE07BD49A2230FF"]);
+        rectHost.Local.Placements = [new Placement { X = 3, Y = 7, Dir = 0 }];
         var rectGuest = new Lobby("B", isHost: false);
         rectGuest.OnSetup(rectHost.Setup());
-        rectGuest.OnSetup(new Frame
-        {
-            Kind = MsgKind.Setup,
-            Army = ["1C96A39FFE37791F8AE07BD49A2230FF"],
-            Placements = [new Placement { X = 3, Y = 4, Dir = 0 }],
-        });
 
         Check("the lobby rotates the peer's squares in the board it was told about",
-              rectGuest.Remote is { } peerSeat && peerSeat.Placements.Count == 1 &&
-              peerSeat.Placements[0] is { X: 1, Y: 3 });
+              rectGuest.Refusal is null && rectGuest.Remote is { } peerSeat && peerSeat.Placements.Count == 1 &&
+              peerSeat.Placements[0] is { X: 1, Y: 0 });
 
         var tailTracker = new TurnTracker(0);
         tailTracker.Push(Frame(Pc(0, 2, 4, 5, 0, 0), Pc(1, 2, 2, 5, 2, 1, acts: 1), Pc(2, 6, 6, 5, 0, 1)));
@@ -3503,16 +3923,749 @@ internal static partial class Program
               Presets.Find([builtin], "GATE") is not null && Presets.Find([builtin], "nope") is null);
 
         var rematchLine = Protocol.Encode(new Frame { Kind = MsgKind.Rematch });
+
+
+
+        const string tjaw261 = "F9433C1448F8F052BD457978CD0BFEC5";
+        const string roller261 = "EC24DE233B69D5702EC68D058C0DF9ED";
+        var charge261 = new Move
+        {
+            SrcX = 2, SrcY = 0, DstX = 2, DstY = 0, TargetX = 3, TargetY = 1,
+            Facing = 2, Attack = true, LandX = 2, LandY = 2,
+        };
+        Check("a charge strikes from the square it charged from and the game runs the charge, never from its landing",
+              charge261.Charged && charge261.StrikeFrom == (2, 0));
+
+        var liveCharge = new Move
+        {
+            SrcX = 2, SrcY = 1, DstX = 2, DstY = 1, TargetX = 2, TargetY = 2,
+            Facing = 2, Attack = true, LandX = 2, LandY = 3,
+        };
+        var chargeOwed = new Move { SrcX = 2, SrcY = 3, DstX = 3, DstY = 3, Facing = 2, LandX = 3, LandY = 3 };
+        Check("the charge that exited a game on 2026-09-22 is armed from the Charger's own square, then its owed move",
+              new Injector("live-probe.exe", armed: false) is var injCharge
+              && injCharge.Apply([liveCharge, chargeOwed]).Result
+              && injCharge.LastCommand!.Contains("attack,2,1,2,2,2,2,1;move,2,3,3,3,2"));
+
+        Check("D-261: a plain attack, a dive and a move still strike where they always did",
+              !new Move { SrcX = 1, SrcY = 1, DstX = 1, DstY = 1, Attack = true, LandX = 1, LandY = 1 }.Charged
+              && new Move { SrcX = 1, SrcY = 1, DstX = 1, DstY = 1, Attack = true, LandX = 1, LandY = 1 }
+                  .StrikeFrom == (1, 1)
+              && new Move { SrcX = 1, SrcY = 1, DstX = 4, DstY = 4, Attack = true, AtkX = 4, AtkY = 4, LandX = 4, LandY = 4 }
+                  .StrikeFrom == (4, 4)
+              && !new Move { SrcX = 1, SrcY = 1, DstX = 2, DstY = 1, LandX = 2, LandY = 1 }.Charged);
+
+        var charging = new BoardSnapshot(4, 5,
+            [
+                new Piece(2, 0, 10, 1, 1) { Uuid = tjaw261, Range = 2 },
+                new Piece(3, 1, 12, 3, 0) { Uuid = "F5172B344148EE7E5DB47BD7A23AF9F9", Range = 3 },
+            ], []) { AiSeat = 1 };
+        Check("D-261: the peer's claimed landing must be where that machine's charge ends",
+              Machines.TurnProblem([charge261], charging, 1) is null
+              && Machines.TurnProblem([Landing(charge261, 1, 3)], charging, 1) is { } wrongLanding
+              && wrongLanding.Contains("charge")
+              && Machines.TurnProblem([Landing(charge261, 2, 4)], charging, 1) is not null);
+
+        var rolling = new BoardSnapshot(4, 5, [new Piece(2, 0, 5, 1, 1) { Uuid = roller261, Range = 2 }], [])
+        {
+            AiSeat = 1,
+        };
+        Check("D-261: a machine that is not a Dash cannot claim a charge at all",
+              Machines.TurnProblem([charge261], rolling, 1) is { } notADash
+              && notADash.Contains("Rollerback"));
+
+        var second202 = new Move
+        {
+            SrcX = 2, SrcY = 2, DstX = 2, DstY = 2, TargetX = 3, TargetY = 3,
+            Facing = 2, Attack = true, LandX = 2, LandY = 4,
+        };
+        Check("a second charge in the same turn is checked from where the first one landed",
+              Machines.TurnProblem([charge261, second202], charging, 1) is null
+              && Machines.TurnProblem([charge261, Landing(second202, 2, 3)], charging, 1) is { } secondWrong
+              && secondWrong.Contains("action 2") && secondWrong.Contains("charge")
+              && Machines.TurnProblem([charge261, Landing(second202, 3, 2)], charging, 1) is not null);
+
+        Check("the square a charge left holds nothing, and an action from it is passed over untested",
+              Machines.TurnProblem([charge261, new Move { SrcX = 2, SrcY = 0, DstX = 2, DstY = 1, Facing = 2 }],
+                                   charging, 1) is null);
+
+        const string scrounger267 = "B78EF94227B7D36454715138E9A17144";
+        const string burrower267 = "1C96A39FFE37791F8AE07BD49A2230FF";
+        const string grazer267 = "2B34B3566FC1ED50071517AE89C5252F";
+        const string charger268 = "FDC39FDFF4CE9C5B8190CE46AAFCF7B5";
+        var reach271 = new BoardSnapshot(8, 8,
+            [
+                new Piece(1, 1, 5, 2, 1, Range: 1, Uuid: scrounger267),
+                new Piece(5, 5, 6, 0, 1, Range: 3, Uuid: "36791A8338E8498ACD11B127EB75CF82"),
+                new Piece(6, 1, 4, 2, 1, Range: 2, Uuid: charger268),
+                new Piece(1, 3, 8, 0, 0, Range: 2, Uuid: "ED68990FF5589A2DA853F0D163682C40"),
+                new Piece(5, 2, 5, 2, 0, Range: 1, Uuid: burrower267),
+                new Piece(6, 2, 4, 0, 0, Range: 1, Uuid: burrower267),
+            ], new sbyte[64]) { AiSeat = 1 };
+        static Move Struck(int srcX, int srcY, int atkX, int atkY, int dstX, int dstY, int targetX, int targetY,
+                           byte facing)
+        {
+            return new Move
+            {
+                SrcX = srcX, SrcY = srcY, AtkX = atkX, AtkY = atkY, DstX = dstX, DstY = dstY,
+                TargetX = targetX, TargetY = targetY, Facing = facing, Attack = true,
+            };
+        }
+
+        Check("an attack that leaves its machine away from the square it strikes from is refused, unless it " +
+              "is a Dive landing next to its victim or a Dash landing its charge",
+              Machines.TurnProblem([Struck(1, 1, 1, 2, 0, 1, 1, 3, 2)], reach271, 1) is { } strikeAway
+              && strikeAway.Contains("only a Dive or a Dash")
+              && Machines.TurnProblem([Struck(1, 1, 1, 2, 4, 1, 1, 3, 2),
+                                       new Move
+                                       {
+                                           SrcX = 1, SrcY = 2, DstX = 1, DstY = 2, Facing = 2, Attack = true,
+                                           TargetX = 1, TargetY = 3, Burst = true,
+                                       }],
+                                      reach271, 1) is { } n1Shape
+              && n1Shape.Contains("action 1")
+              && Machines.TurnProblem([Struck(5, 5, 5, 5, 2, 5, 5, 2, 0)], reach271, 1) is { } diveAway
+              && diveAway.Contains("next to its victim")
+              && Machines.TurnProblem([Struck(5, 5, 5, 5, 5, 3, 5, 2, 0)], reach271, 1) is null
+              && Machines.TurnProblem([Struck(6, 1, 6, 1, 6, 3, 6, 2, 2)], reach271, 1) is null
+              && Machines.TurnProblem([Struck(6, 1, 6, 1, 6, 5, 6, 2, 2)], reach271, 1) is { } dashAway
+              && dashAway.Contains("charge"));
+
+        var threeOfOurs = new BoardSnapshot(8, 8,
+            [
+                new Piece(1, 6, 4, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(3, 6, 4, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(5, 6, 4, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(3, 4, 4, 2, 0, Range: 1, Uuid: burrower267),
+            ], new sbyte[64]) { AiSeat = 1 };
+        var inLine270 = new BoardSnapshot(8, 8,
+            [
+                new Piece(1, 6, 4, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(3, 6, 4, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(3, 1, 4, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(3, 4, 4, 2, 0, Range: 1, Uuid: burrower267),
+            ], new sbyte[64]) { AiSeat = 1 };
+        Check("a turn with more activations than the rules allow is refused, and an attack with the move it " +
+              "owes, a move with the Rotate attack it fires, and an Overcharge each add none, while a Rotate attack " +
+              "owes no move, so another machine's move after it starts an activation",
+              Machines.TurnProblem([new Move { SrcX = 3, SrcY = 6, DstX = 3, DstY = 5, Facing = 0 },
+                                    new Move { SrcX = 3, SrcY = 5, DstX = 3, DstY = 5, Facing = 0, Attack = true, TargetX = 3, TargetY = 4 },
+                                    new Move { SrcX = 5, SrcY = 6, DstX = 5, DstY = 5, Facing = 0 },
+                                    new Move { SrcX = 1, SrcY = 6, DstX = 1, DstY = 5, Facing = 0 }],
+                                   threeOfOurs, 1) is { } rotateThenTwo
+              && rotateThenTwo.Contains("3 activations")
+              && Machines.TurnProblem([new Move { SrcX = 3, SrcY = 6, DstX = 3, DstY = 5, Facing = 0 },
+                                       new Move { SrcX = 3, SrcY = 5, DstX = 3, DstY = 5, Facing = 0, Attack = true, TargetX = 3, TargetY = 4 },
+                                       new Move { SrcX = 3, SrcY = 1, DstX = 2, DstY = 1, Facing = 3 },
+                                       new Move { SrcX = 1, SrcY = 6, DstX = 1, DstY = 5, Facing = 0 }],
+                                      inLine270, 1) is { } rotateThenInLine
+              && rotateThenInLine.Contains("3 activations")
+              && Machines.TurnProblem([new Move { SrcX = 1, SrcY = 6, DstX = 1, DstY = 5, Facing = 0 },
+                                       new Move { SrcX = 3, SrcY = 6, DstX = 2, DstY = 6, Facing = 3 },
+                                       new Move { SrcX = 5, SrcY = 6, DstX = 5, DstY = 5, Facing = 0 }],
+                                      threeOfOurs, 1) is { } threeUsed
+              && threeUsed.Contains("3 activations")
+              && Machines.TurnProblem([new Move { SrcX = 3, SrcY = 6, DstX = 3, DstY = 6, Facing = 0, Attack = true, TargetX = 3, TargetY = 4 },
+                                       new Move { SrcX = 3, SrcY = 6, DstX = 2, DstY = 6, Facing = 3 },
+                                       new Move { SrcX = 1, SrcY = 6, DstX = 1, DstY = 5, Facing = 0 },
+                                       new Move { SrcX = 5, SrcY = 6, DstX = 5, DstY = 5, Facing = 0 }],
+                                      threeOfOurs, 1) is { } threeWithStrike
+              && threeWithStrike.Contains("3 activations")
+              && Machines.TurnProblem([new Move { SrcX = 3, SrcY = 6, DstX = 3, DstY = 6, Facing = 0, Attack = true, TargetX = 3, TargetY = 4 },
+                                       new Move { SrcX = 3, SrcY = 6, DstX = 2, DstY = 6, Facing = 3 },
+                                       new Move { SrcX = 1, SrcY = 6, DstX = 1, DstY = 5, Facing = 0 },
+                                       new Move { SrcX = 1, SrcY = 5, DstX = 2, DstY = 5, Facing = 1, Burst = true }],
+                                      threeOfOurs, 1) is null
+              && Machines.TurnProblem([new Move { SrcX = 3, SrcY = 6, DstX = 3, DstY = 5, Facing = 0 },
+                                       new Move { SrcX = 3, SrcY = 5, DstX = 3, DstY = 5, Facing = 0, Attack = true, TargetX = 3, TargetY = 4 },
+                                       new Move { SrcX = 5, SrcY = 6, DstX = 5, DstY = 5, Facing = 0 }],
+                                      threeOfOurs, 1) is null);
+
+        var gateV12 = new BoardSnapshot(8, 8,
+            [
+                new Piece(4, 4, 4, 2, 1, Range: 1, Uuid: burrower267),
+                new Piece(3, 6, 4, 0, 0, Range: 1, Uuid: burrower267),
+                new Piece(3, 4, 4, 2, 1, Range: 1, Uuid: grazer267),
+                new Piece(4, 6, 4, 0, 0, Range: 1, Uuid: grazer267),
+            ], new sbyte[64]) { AiSeat = 0 };
+        Check("a Ram's push and advance, its Overcharge move back from its victim's square, and a strike then an " +
+              "Overcharge move onto the struck square still pass (gate-v12, turn 1)",
+              Machines.TurnProblem([new Move { SrcX = 4, SrcY = 6, DstX = 4, DstY = 5, Facing = 0, Attack = true, TargetX = 4, TargetY = 4 },
+                                    new Move { SrcX = 4, SrcY = 4, DstX = 4, DstY = 5, Facing = 0, Burst = true },
+                                    new Move { SrcX = 3, SrcY = 6, DstX = 3, DstY = 5, Facing = 0, Attack = true, TargetX = 3, TargetY = 4 },
+                                    new Move { SrcX = 3, SrcY = 5, DstX = 3, DstY = 4, Facing = 0, Burst = true }],
+                                   gateV12, 0) is null);
+
+        var towPull = new BoardSnapshot(8, 8,
+            [
+                new Piece(2, 6, 7, 0, 1, Range: 3, Uuid: "4B962F6770CF0C4B905C3E2782E46B24"),
+                new Piece(3, 3, 4, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(2, 3, 4, 2, 0, Range: 1, Uuid: grazer267),
+            ], new sbyte[64]) { AiSeat = 1 };
+        var towStrike = new Move { SrcX = 2, SrcY = 6, DstX = 2, DstY = 6, Facing = 0, Attack = true, TargetX = 2, TargetY = 3 };
+        var towOwed = new Move { SrcX = 2, SrcY = 6, DstX = 1, DstY = 6, Facing = 3 };
+        var ontoLeft = new Move { SrcX = 3, SrcY = 3, DstX = 2, DstY = 3, Facing = 3 };
+        Check("a Tow that pulls its victim, its own move after, and a machine then moving onto the square the " +
+              "victim left still pass",
+              Machines.TurnProblem([towStrike, towOwed, ontoLeft], towPull, 1) is null);
+
+        Check("after an attack in place, a move counts as the one it owes only from a square the attacker can " +
+              "be on, so another machine's move between the attack and its owed move starts an activation",
+              Machines.Activations([towStrike, ontoLeft, towOwed], 8) == 3
+              && Machines.Activations([towStrike, towOwed, ontoLeft], 8) == 2
+              && Machines.Activations([towStrike, towOwed], 8) == 1
+              && Machines.Activations([new Move { SrcX = 4, SrcY = 3, DstX = 4, DstY = 3, Facing = 0, Attack = true, TargetX = 4, TargetY = 2 },
+                                       new Move { SrcX = 4, SrcY = 1, DstX = 5, DstY = 1, Facing = 3 }], 6) == 1);
+
+        var haltHunter = new BoardSnapshot(6, 5,
+            [
+                new Piece(4, 3, 10, 0, 0, Range: 2, Skill: 5, Uuid: "23C2AA3CCB2680F418CA1D7E9F179E9D"),
+                new Piece(5, 0, 4, 2, 1, Range: 1, Uuid: burrower267),
+                new Piece(5, 2, 8, 0, 0, Range: 3, Skill: 5, Uuid: "7875B4B22E79B8BF0996D4B74BCC0477"),
+                new Piece(5, 4, 4, 0, 0, Range: 1, Uuid: "C5A08FEFF4757D3A3BD4A614A0B5E948"),
+                new Piece(4, 2, 3, 2, 1, Range: 1, Uuid: "76D3C3711B67863E82D8C703AAB1A815"),
+                new Piece(3, 3, 7, 0, 0, Range: 3, Uuid: "4B962F6770CF0C4B905C3E2782E46B24"),
+                new Piece(3, 0, 7, 2, 1, Range: 1, Uuid: "05662ED22BB56D93305986970E81E6C4"),
+                new Piece(4, 4, 2, 0, 0, Range: 1, Uuid: "A70D3B57757E0A4692DF0D4511231EDE"),
+                new Piece(4, 0, 10, 2, 1, Range: 2, Uuid: "370A5C1EE3F50A95FE7A04BE068355FC"),
+            ], new sbyte[30]) { AiSeat = 0 };
+        Check("a charge read without its landing, the charger's next move from where it landed, and moves onto the " +
+              "square it charged from and onto its victim's square still pass (halt-hunter, turn 2)",
+              Machines.TurnProblem([new Move { SrcX = 4, SrcY = 3, DstX = 4, DstY = 3, Facing = 0, Attack = true, TargetX = 4, TargetY = 2 },
+                                    new Move { SrcX = 4, SrcY = 1, DstX = 5, DstY = 1, Facing = 3 },
+                                    new Move { SrcX = 4, SrcY = 4, DstX = 4, DstY = 3, Facing = 1 },
+                                    new Move { SrcX = 4, SrcY = 3, DstX = 4, DstY = 2, Facing = 1, Burst = true }],
+                                   haltHunter, 0) is null);
+
+        var walkCharge268 = new BoardSnapshot(4, 4,
+            [
+                new Piece(3, 1, 2, 0, 1, Range: 2, Uuid: charger268),
+                new Piece(1, 0, 4, 2, 0, Range: 2, Uuid: charger268),
+                new Piece(0, 2, 1, 0, 1, Range: 1, Uuid: burrower267),
+                new Piece(1, 2, 2, 0, 0, Range: 1, Uuid: burrower267),
+            ], new sbyte[16]) { AiSeat = 0 };
+        var inPlaceCharge268 = new BoardSnapshot(4, 4,
+            [
+                new Piece(1, 2, 4, 0, 0, Range: 2, Uuid: charger268),
+                new Piece(3, 1, 4, 2, 1, Range: 2, Uuid: charger268),
+                new Piece(2, 2, 4, 0, 0, Range: 1, Uuid: burrower267),
+                new Piece(1, 1, 4, 2, 1, Range: 1, Uuid: burrower267),
+            ], new sbyte[16]) { AiSeat = 0 };
+        Check("a walk then a charge, and a charge in place, each followed by the charger's move from its landing, " +
+              "still pass (walk-then-charge-ending, PC1's last turn and PC2's turn 1)",
+              Machines.TurnProblem([new Move
+                                    {
+                                        SrcX = 1, SrcY = 0, DstX = 3, DstY = 0, Facing = 2, Attack = true,
+                                        TargetX = 3, TargetY = 1, LandX = 3, LandY = 2,
+                                    },
+                                    new Move { SrcX = 3, SrcY = 2, DstX = 2, DstY = 2, Facing = 3, Burst = true }],
+                                   walkCharge268, 0) is null
+              && Machines.TurnProblem([new Move
+                                       {
+                                           SrcX = 1, SrcY = 2, DstX = 1, DstY = 2, Facing = 0, Attack = true,
+                                           TargetX = 1, TargetY = 1, LandX = 1, LandY = 0,
+                                       },
+                                       new Move { SrcX = 1, SrcY = 0, DstX = 0, DstY = 0, Facing = 0, LandX = 0, LandY = 0 },
+                                       new Move { SrcX = 2, SrcY = 2, DstX = 3, DstY = 2, Facing = 1, LandX = 3, LandY = 2 }],
+                                      inPlaceCharge268, 0) is null);
+
+        var dyingAttacker = new BoardSnapshot(8, 8,
+            [
+                new Piece(3, 5, 8, 0, 1, Range: 1, Uuid: "82F13F6222FCF687A5684CC1F9B96F4F"),
+                new Piece(5, 7, 10, 0, 0, Range: 2, Uuid: "D132E56AAEF7AC7F24DBC79886876512"),
+                new Piece(4, 3, 8, 2, 1, Range: 2, Uuid: "373D8F477EAEAF6BE80EFF08610BBA8F"),
+                new Piece(7, 4, 5, 2, 1, Range: 2, Uuid: "D7570C9AAEC2D94C677452D1861A99DA"),
+                new Piece(1, 1, 6, 2, 1, Range: 3, Uuid: "36791A8338E8498ACD11B127EB75CF82"),
+                new Piece(5, 6, 5, 0, 0, Range: 3, Uuid: "4726C13DD5722AF80595854DA7E2FCBF"),
+            ], new sbyte[64]) { AiSeat = 0 };
+        Check("a Dive with its firing square on the wire, its Overcharge move onto its victim's square after the " +
+              "knockback, and another machine's walk, strike and Overcharge strike still pass (dying-attacker, turn 2)",
+              Machines.TurnProblem([Struck(5, 6, 7, 6, 7, 5, 7, 4, 0),
+                                    new Move { SrcX = 7, SrcY = 5, DstX = 7, DstY = 4, Facing = 0, Burst = true },
+                                    new Move { SrcX = 5, SrcY = 7, DstX = 3, DstY = 6, Facing = 0, Attack = true, TargetX = 3, TargetY = 5 },
+                                    new Move
+                                    {
+                                        SrcX = 3, SrcY = 6, DstX = 3, DstY = 6, Facing = 0, Attack = true,
+                                        TargetX = 3, TargetY = 5, Burst = true,
+                                    }],
+                                   dyingAttacker, 0) is null);
+
+        var relocatedDive = new BoardSnapshot(8, 8,
+            [
+                new Piece(4, 4, 2, 0, 0, Range: 3, Uuid: "4726C13DD5722AF80595854DA7E2FCBF"),
+                new Piece(5, 3, 6, 2, 1, Range: 2, Uuid: "D132E56AAEF7AC7F24DBC79886876512"),
+                new Piece(2, 5, 1, 0, 0, Range: 3, Skill: 5, Uuid: "7875B4B22E79B8BF0996D4B74BCC0477"),
+                new Piece(4, 5, 11, 2, 1, Range: 3, Uuid: "F5172B344148EE7E5DB47BD7A23AF9F9"),
+                new Piece(3, 4, 7, 0, 0, Range: 2, Uuid: "D7570C9AAEC2D94C677452D1861A99DA"),
+                new Piece(2, 4, 9, 0, 0, Range: 3, Uuid: "435534A445562BA16633AF4B908D83B2"),
+                new Piece(2, 3, 5, 2, 1, Range: 2, Uuid: "ADEA18E33DA2CAF15010D29CA12FE1F3"),
+                new Piece(4, 6, 7, 0, 0, Range: 2, Uuid: "D7570C9AAEC2D94C677452D1861A99DA"),
+            ], new sbyte[64]) { AiSeat = 0 };
+        Check("a Dive that relocated beside its victim with no firing square on the wire, then moved back from " +
+              "there, still passes (inplace-shot-facing, PC2's turn 4)",
+              Machines.TurnProblem([new Move
+                                    {
+                                        SrcX = 4, SrcY = 4, DstX = 5, DstY = 5, Facing = 0, Attack = true,
+                                        TargetX = 5, TargetY = 3, LandX = 5, LandY = 5,
+                                    },
+                                    new Move { SrcX = 5, SrcY = 4, DstX = 5, DstY = 5, Facing = 0, Burst = true, LandX = 5, LandY = 5 },
+                                    new Move { SrcX = 2, SrcY = 5, DstX = 1, DstY = 5, Facing = 2, LandX = 1, LandY = 5 }],
+                                   relocatedDive, 0) is null);
+
+        Check("a turn the live board check stopped part way halts with its own reason, worded for an action that " +
+              "could not be played or could not be checked, which says the actions before it are already on this board",
+              Injector.HaltReason(Injector.GateRefused, 3) is { } gateHalt
+              && gateHalt.Contains("could not play or could not check") && gateHalt.Contains("already on this board")
+              && !gateHalt.Contains("injection failed")
+              && Injector.HaltReason(6, 3) is { } otherHalt
+              && otherHalt.Contains("injection failed") && otherHalt.Contains("3 action(s)")
+              && !gateHalt.Contains(';') && !otherHalt.Contains(';')
+              && Injector.GateSummaryOf(["  game time 4.2 s", "  gate: 4 checkpoints, least margin 270 ms"])
+                 == "gate: 4 checkpoints, least margin 270 ms");
+
+        var staleExit = new Injector("live-probe.exe", armed: false);
+        staleExit.LastExit = Injector.GateRefused;
+        var staleApplied = staleExit.Apply([new Move { SrcX = 1, SrcY = 6, DstX = 1, DstY = 5, Facing = 0 }]).Result;
+        Check("only the live board check's own halt adds that a release of the freeze can close the game, and a turn " +
+              "whose live-probe never ran does not reuse the last turn's exit as the check's halt",
+              FrozenLineFor(Injector.GateHaltText) is { } gateFrozen
+              && gateFrozen.StartsWith(FrozenLine, StringComparison.Ordinal) && gateFrozen.Contains("can close the game")
+              && FrozenLine.Contains("Only a person releases it") && !FrozenLine.Contains("close the game")
+              && FrozenLineFor(Injector.HaltReason(6, 3)) == FrozenLine
+              && FrozenLineFor(Peer.RelayedHaltReason(Injector.GateHaltText)) == FrozenLine
+              && !gateFrozen.Contains(';')
+              && staleApplied && staleExit.LastExit == Injector.NoExit
+              && Injector.HaltReason(staleExit.LastExit, 1) != Injector.GateHaltText);
+
+        var buffed204 = new BoardSnapshot(4, 5, [new Piece(2, 0, 10, 1, 1) { Uuid = tjaw261, Range = 3 }], [])
+        {
+            AiSeat = 1,
+        };
+        var unknown204 = new BoardSnapshot(4, 5, [new Piece(2, 0, 10, 1, 1) { Uuid = tjaw261 }], [])
+        {
+            AiSeat = 1,
+        };
+        Check("a charge is measured by the live range the board carries, and the table's only without one",
+              Machines.TurnProblem([Landing(charge261, 2, 3)], buffed204, 1) is null
+              && Machines.TurnProblem([charge261], buffed204, 1) is { } byTable
+              && byTable.Contains("(2,3)")
+              && Machines.TurnProblem([Landing(charge261, 2, 4)], buffed204, 1) is not null
+              && unknown204.Pieces[0].Range < 1
+              && Machines.TurnProblem([charge261], unknown204, 1) is null);
+        Check("a halt keeps the link open for the files alone, for a bounded time",
+              Peer.DrainCarries(MsgKind.Recording)
+              && !Peer.DrainCarries(MsgKind.Move) && !Peer.DrainCarries(MsgKind.Halt)
+              && !Peer.DrainCarries(MsgKind.Place) && !Peer.DrainCarries(MsgKind.Hash)
+              && !Peer.DrainCarries(MsgKind.Rematch) && !Peer.DrainCarries(MsgKind.Sealed)
+              && Peer.HaltDrain > TimeSpan.Zero && Peer.HaltDrain <= TimeSpan.FromMinutes(1));
+
+        Check("D-263: the drain carries the three files a halt sends and nothing else",
+              Peer.DrainCarries(MsgKind.Recording) && Peer.DrainCarries(MsgKind.RecordingStart)
+              && Peer.DrainCarries(MsgKind.Log)
+              && !Peer.DrainCarries(MsgKind.Halt) && !Peer.DrainCarries(MsgKind.Sealed)
+              && !Peer.DrainCarries(MsgKind.Move) && !Peer.DrainCarries(MsgKind.Hash));
+
+        Check("the drain outlasts the three paced sends and the wait before them",
+              Program.RecordingPace.TotalSeconds * FrameLimits.MaxHaltParts
+                  + Program.HaltSettle.TotalSeconds < Peer.HaltDrain.TotalSeconds
+              && Program.HaltSettle > TimeSpan.Zero
+              && Program.RecordingPace.TotalSeconds * FrameLimits.MaxFramesPerWindow
+                 > FrameLimits.RateWindow.TotalSeconds);
+
+        Check("D-263: the three files a halt sends add up to the parts a halt may send",
+              FrameLimits.MaxRecordingStartParts + FrameLimits.MaxRecordingTailParts + FrameLimits.MaxLogParts
+                  == FrameLimits.MaxHaltParts
+              && FrameLimits.MaxHaltParts <= FrameLimits.MaxRecordingParts
+              && FrameLimits.MaxRecordingStartBytes < FrameLimits.MaxRecordingTailBytes
+              && FrameLimits.MaxRecordingTailBytes <= FrameLimits.MaxRecordingBytes);
+
+        var biggest = new Frame
+        {
+            Kind = MsgKind.Recording,
+            Part = FrameLimits.MaxRecordingParts - 1,
+            Parts = FrameLimits.MaxRecordingParts,
+            Data = new string('A', FrameLimits.MaxRecordingPartChars),
+        };
+        var keys = KeyExchange.Complete("CODE", KeyExchange.Begin(), KeyExchange.PublicBlob(KeyExchange.Begin()),
+                                        isHost: true);
+        var sealedBiggest = new SecureChannel(keys!).Seal(Protocol.Encode(biggest));
+        Check("a part at its cap still fits the line cap once it is sealed and enveloped",
+              Protocol.Encode(new Frame { Kind = MsgKind.Sealed, Box = sealedBiggest }).Length
+                  < FrameLimits.MaxLine);
+
+        var biggestLog = new Frame
+        {
+            Kind = MsgKind.Log,
+            Part = FrameLimits.MaxLogParts - 1,
+            Parts = FrameLimits.MaxLogParts,
+            Data = new string('A', FrameLimits.MaxRecordingPartChars),
+        };
+        var biggestStart = new Frame
+        {
+            Kind = MsgKind.RecordingStart,
+            Part = FrameLimits.MaxRecordingStartParts - 1,
+            Parts = FrameLimits.MaxRecordingStartParts,
+            Data = new string('A', FrameLimits.MaxRecordingPartChars),
+        };
+        var sealedLog = new SecureChannel(keys!).Seal(Protocol.Encode(biggestLog));
+        var sealedStart = new SecureChannel(keys!).Seal(Protocol.Encode(biggestStart));
+        Check("D-263: a log part and a start part at their cap fit the line cap once sealed and enveloped",
+              Protocol.Encode(new Frame { Kind = MsgKind.Sealed, Box = sealedLog }).Length < FrameLimits.MaxLine
+              && Protocol.Encode(new Frame { Kind = MsgKind.Sealed, Box = sealedStart }).Length
+                 < FrameLimits.MaxLine);
+
+        Check("D-263: a Log frame and a RecordingStart frame round-trip as themselves",
+              Protocol.Decode(Protocol.Encode(new Frame { Kind = MsgKind.Log, Part = 2, Parts = 3, Data = "AAAA" }))
+                  is { Kind: MsgKind.Log, Part: 2, Parts: 3, Data: "AAAA" }
+              && Protocol.Decode(Protocol.Encode(new Frame
+                 {
+                     Kind = MsgKind.RecordingStart,
+                     Part = 0,
+                     Parts = 1,
+                     Data = "AAAA",
+                 })) is { Kind: MsgKind.RecordingStart, Part: 0, Parts: 1, Data: "AAAA" });
+
+        Check("a name crosses as hex, so no name can spell a halt on a console line",
+              Names.Hex("HALT") == "48414C54"
+              && !Names.Hex("HALT").Contains("HALT", StringComparison.OrdinalIgnoreCase)
+              && !Names.Hex("ASPHALT").Contains("HALT", StringComparison.OrdinalIgnoreCase)
+              && Names.Hex("BOB") == "424F42");
+        var recordingBytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100 * 1024));
+        var recordingParts = Recordings.Parts(recordingBytes);
+        Check("D-260: a recording crosses as parts inside the frame cap, each numbered and counted",
+              recordingParts.Count == 5
+              && recordingParts.All(p => p.Kind == MsgKind.Recording && p.Parts == 5)
+              && recordingParts.Select(p => p.Part).SequenceEqual([0, 1, 2, 3, 4])
+              && recordingParts.All(p => (p.Data ?? "").Length <= FrameLimits.MaxRecordingPartChars)
+              && recordingParts.All(p => Protocol.Encode(p).Length < FrameLimits.MaxLine)
+              && Recordings.Parts([]).Count == 0);
+
+        var takenIn = NewTailFile();
+        string? feedProblem = null;
+        foreach (var part in recordingParts)
+        {
+            feedProblem ??= takenIn.Offer(part, halted: true);
+        }
+
+        Check("D-260: the parts of a halted peer's recording assemble back into the same bytes",
+              feedProblem is null && takenIn.Done && takenIn.Taken is not null
+              && takenIn.Taken!.SequenceEqual(recordingBytes));
+
+        Check("D-260: a recording is taken only while this PC is halted, and only once",
+              NewTailFile().Offer(recordingParts[0], halted: false) is not null
+              && takenIn.Offer(recordingParts[0], halted: true) is not null);
+
+        var outOfOrder = NewTailFile();
+        var overCount = NewTailFile();
+        var junk = NewTailFile();
+        Check("D-260: a recording out of order, over the part count, or not readable is refused",
+              outOfOrder.Offer(recordingParts[1], halted: true) is not null
+              && overCount.Offer(new Frame
+              {
+                  Kind = MsgKind.Recording,
+                  Part = 0,
+                  Parts = FrameLimits.MaxRecordingParts + 1,
+                  Data = "AAAA",
+              }, halted: true) is not null
+              && junk.Offer(new Frame { Kind = MsgKind.Recording, Part = 0, Parts = 1, Data = "not base64!" },
+                            halted: true) is not null);
+
+        var oversize = NewTailFile();
+        var oversizePart = new string('A', FrameLimits.MaxRecordingPartChars + 4);
+        Check("D-260: a part over the size a part may be is refused before it is decoded",
+              oversize.Offer(new Frame { Kind = MsgKind.Recording, Part = 0, Parts = 2, Data = oversizePart },
+                             halted: true) is not null);
+
+        var halfway = NewTailFile();
+        _ = halfway.Offer(recordingParts[0], halted: true);
+        _ = halfway.Offer(recordingParts[1], halted: true);
+        Check("D-262: a recording that never finished says how far it got, and a finished one says nothing",
+              takenIn.Unfinished() is null
+              && NewTailFile().Unfinished() is { } never && never.Contains("did not arrive")
+              && halfway.Unfinished() is { } half && half.Contains("2 of 5")
+              && outOfOrder.Unfinished() is { } dropped && dropped.Contains("refused"));
+
+        Check("D-262: the other PC's recording is named after this PC's recording of the same match",
+              Recordings.NameFor(@"C:\Other\recordings\match-20260921-175500.jsonl", new DateTime(2026, 9, 21, 18, 0, 0))
+                  == "opponent-20260921-175500.jsonl"
+              && Recordings.NameFor("match-20260921-175500.jsonl", DateTime.Now) == "opponent-20260921-175500.jsonl"
+              && Recordings.NameFor(null, new DateTime(2026, 9, 21, 18, 0, 0)) == "opponent-20260921-180000.jsonl"
+              && Recordings.NameFor(@"C:\Other\stale.jsonl", new DateTime(2026, 9, 21, 18, 0, 0))
+                  == "opponent-20260921-180000.jsonl"
+              && Recordings.NameFor("match-.jsonl", new DateTime(2026, 9, 21, 18, 0, 0))
+                  == "opponent-20260921-180000.jsonl");
+
+        Check("D-263: the start and the log are named after this PC's recording of the same match",
+              Recordings.StartNameFor(@"C:\Other\recordings\match-20260921-175500.jsonl",
+                                      new DateTime(2026, 9, 21, 18, 0, 0))
+                  == "opponent-20260921-175500-start.jsonl"
+              && Recordings.LogNameFor(@"C:\Other\recordings\match-20260921-175500.jsonl",
+                                       new DateTime(2026, 9, 21, 18, 0, 0))
+                 == "opponent-20260921-175500.log"
+              && Recordings.StartNameFor(null, new DateTime(2026, 9, 21, 18, 0, 0))
+                 == "opponent-20260921-180000-start.jsonl"
+              && Recordings.LogNameFor(null, new DateTime(2026, 9, 21, 18, 0, 0))
+                 == "opponent-20260921-180000.log");
+
+        var nasty = new byte[]
+        {
+            0x1B, (byte)'[', (byte)'3', (byte)'1', (byte)'m', 0xE2, 0x80, 0xAE,
+            (byte)'a', 0x09, 0x0A, 0x0D, 0x7F, 0x00,
+        };
+        var scrubbed = Recordings.Scrubbed(nasty);
+        Check("D-263: what the other PC sends is scrubbed to plain text before it is written",
+              scrubbed.Length == nasty.Length
+              && scrubbed[0] == (byte)'?' && scrubbed[5] == (byte)'?' && scrubbed[6] == (byte)'?'
+              && scrubbed[7] == (byte)'?' && scrubbed[12] == (byte)'?' && scrubbed[13] == (byte)'?'
+              && scrubbed[1] == (byte)'[' && scrubbed[8] == (byte)'a'
+              && scrubbed[9] == 0x09 && scrubbed[10] == 0x0A && scrubbed[11] == 0x0D
+              && !scrubbed.Contains((byte)0x1B) && !scrubbed.Contains((byte)0xE2));
+
+        var lineDir = Directory.CreateTempSubdirectory("strikers-selftest-lines-");
+        try
+        {
+            var linePath = Path.Combine(lineDir.FullName, "match-20260921-175500.jsonl");
+            var made = new System.Text.StringBuilder();
+            for (var i = 0; i < 40; i++)
+            {
+                made.Append(new string((char)('a' + (i % 26)), 99));
+                made.Append('\n');
+            }
+
+            File.WriteAllText(linePath, made.ToString());
+            var headRead = Recordings.Head(linePath, 250);
+            var tailRead = Recordings.Tail(linePath, 250);
+            Check("D-263: the start of a recording is cut back to the last whole line",
+                  headRead is { Length: 200 } && headRead[^1] == (byte)'\n' && headRead[0] == (byte)'a'
+                  && Recordings.Head(linePath, 8000) is { Length: 4000 });
+
+            Check("D-263: the tail of a recording is cut forward to the first whole line",
+                  tailRead is { Length: 200 } && tailRead[^1] == (byte)'\n' && tailRead[0] == (byte)'m'
+                  && Recordings.Tail(linePath, 8000) is { Length: 4000 });
+
+            var emptyPath = Path.Combine(lineDir.FullName, "empty.jsonl");
+            File.WriteAllText(emptyPath, "");
+            Check("D-263: a file that is missing or empty is read as nothing to send",
+                  Recordings.Head(Path.Combine(lineDir.FullName, "gone.jsonl"), 250) is null
+                  && Recordings.Tail(Path.Combine(lineDir.FullName, "gone.jsonl"), 250) is null
+                  && Recordings.Head(emptyPath, 250) is null && Recordings.Tail(emptyPath, 250) is null
+                  && Recordings.LogTail(lineDir.FullName) is null);
+
+            File.WriteAllText(Path.Combine(lineDir.FullName, Recordings.LogName), "one line\ntwo lines\n");
+            using var held = new FileStream(Path.Combine(lineDir.FullName, Recordings.LogName),
+                                            FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+            Check("D-263: the log is read from netplay's own folder while the launcher still holds it open",
+                  Recordings.LogTail(lineDir.FullName) is { Length: 19 });
+        }
+        finally
+        {
+            Directory.Delete(lineDir.FullName, recursive: true);
+        }
+
+        var oneLine = System.Text.Encoding.UTF8.GetBytes("{\"sample\":1}\n");
+        var startParts = Recordings.Parts(oneLine, MsgKind.RecordingStart, FrameLimits.MaxRecordingStartParts);
+        var logParts = Recordings.Parts(oneLine, MsgKind.Log, FrameLimits.MaxLogParts);
+        var tailParts = Recordings.Parts(oneLine, MsgKind.Recording, FrameLimits.MaxRecordingTailParts);
+        var intoStart = NewStartFile();
+        var intoLog = NewLogFile();
+        var intoTail = NewTailFile();
+        var startProblem = intoStart.Offer(startParts[0], halted: true);
+        var logProblem = intoLog.Offer(logParts[0], halted: true);
+        var tailProblem = intoTail.Offer(tailParts[0], halted: true);
+        var secondLog = intoLog.Offer(logParts[0], halted: true);
+        Check("D-263: the three files land in three receivers, and a second log is dropped",
+              startParts[0].Kind == MsgKind.RecordingStart && logParts[0].Kind == MsgKind.Log
+              && tailParts[0].Kind == MsgKind.Recording
+              && startProblem is null && logProblem is null && tailProblem is null
+              && intoStart.Done && intoLog.Done && intoTail.Done
+              && intoStart.Taken!.SequenceEqual(oneLine) && intoLog.Taken!.SequenceEqual(oneLine)
+              && intoTail.Taken!.SequenceEqual(oneLine)
+              && secondLog is { } dropped263 && dropped263.Contains("a second time"));
+
+        Check("D-263: a file over the parts its kind may send is not sent at all",
+              Recordings.Parts(new byte[FrameLimits.MaxRecordingStartBytes * 2], MsgKind.RecordingStart,
+                               FrameLimits.MaxRecordingStartParts) is []
+              && Recordings.Parts(new byte[FrameLimits.MaxLogBytes * 2], MsgKind.Log, FrameLimits.MaxLogParts) is []
+              && Recordings.Parts([], MsgKind.Log, FrameLimits.MaxLogParts) is []);
+
+        var nineLogs = new Frame
+        {
+            Kind = MsgKind.Log,
+            Part = 0,
+            Parts = FrameLimits.MaxLogParts + 1,
+            Data = "AAAA",
+        };
+        var sevenStarts = new Frame
+        {
+            Kind = MsgKind.RecordingStart,
+            Part = 0,
+            Parts = FrameLimits.MaxRecordingStartParts + 1,
+            Data = "AAAA",
+        };
+        Check("a file is held to the parts its own kind may send, not the parts a whole halt may send",
+              NewLogFile().Offer(nineLogs, halted: true) is { } tooManyLogs
+              && tooManyLogs.Contains($"claimed {FrameLimits.MaxLogParts + 1} parts")
+              && NewStartFile().Offer(sevenStarts, halted: true) is { } tooManyStarts
+              && tooManyStarts.Contains($"claimed {FrameLimits.MaxRecordingStartParts + 1} parts")
+              && NewTailFile().Offer(new Frame
+                 {
+                     Kind = MsgKind.Recording,
+                     Part = 0,
+                     Parts = FrameLimits.MaxRecordingTailParts + 1,
+                     Data = "AAAA",
+                 }, halted: true) is not null
+              && nineLogs.Parts <= FrameLimits.MaxRecordingParts
+              && sevenStarts.Parts <= FrameLimits.MaxRecordingParts);
+
+        var fullPart198 = new string('A', FrameLimits.MaxRecordingPartChars);
+        var fillingStart = NewStartFile();
+        string? startOverfull = null;
+        for (var i = 0; i < FrameLimits.MaxRecordingStartParts && startOverfull is null; i++)
+        {
+            startOverfull = fillingStart.Offer(new Frame
+            {
+                Kind = MsgKind.RecordingStart,
+                Part = i,
+                Parts = FrameLimits.MaxRecordingStartParts,
+                Data = fullPart198,
+            }, halted: true);
+        }
+
+        var partBytes198 = FrameLimits.MaxRecordingPartChars / 4 * 3;
+        Check("a file is held to the bytes its own kind may send, inside the parts it may send",
+              startOverfull is { } overfull && overfull.Contains("over the size a file may be")
+              && FrameLimits.MaxRecordingStartParts * partBytes198 > FrameLimits.MaxRecordingStartBytes
+              && FrameLimits.MaxRecordingTailParts * partBytes198 == FrameLimits.MaxRecordingTailBytes
+              && FrameLimits.MaxLogParts * partBytes198 == FrameLimits.MaxLogBytes);
+
+        Check("the three kinds' caps each sit under the ceiling a file may claim, and add up to a halt's",
+              FrameLimits.MaxRecordingStartParts <= FrameLimits.MaxRecordingParts
+              && FrameLimits.MaxRecordingTailParts <= FrameLimits.MaxRecordingParts
+              && FrameLimits.MaxLogParts <= FrameLimits.MaxRecordingParts
+              && FrameLimits.MaxRecordingStartBytes <= FrameLimits.MaxRecordingBytes
+              && FrameLimits.MaxRecordingTailBytes <= FrameLimits.MaxRecordingBytes
+              && FrameLimits.MaxLogBytes <= FrameLimits.MaxRecordingBytes
+              && FrameLimits.MaxRecordingStartParts + FrameLimits.MaxRecordingTailParts + FrameLimits.MaxLogParts
+                 == FrameLimits.MaxHaltParts);
+
+        var wentOut = new[]
+        {
+            WentOut(OurStartWhat, 3, 3), WentOut(OurRecordingWhat, 4, 4), WentOut(OurLogWhat, 2, 2),
+            WentOut(OurStartWhat, 1, 3), WentOut(OurRecordingWhat, 2, 4), WentOut(OurLogWhat, 1, 2),
+        };
+        var neverCame = new[]
+        {
+            NewStartFile().Unfinished()!,
+            NewTailFile().Unfinished()!,
+            NewLogFile().Unfinished()!,
+        };
+        Check("D-263: each file says it went out, whole or in part, in a sentence with no semicolon",
+              wentOut[0] == "  -> the start of this PC's recording went out, 3 part(s)"
+              && wentOut[1] == "  -> this PC's recording of the match went out, 4 part(s)"
+              && wentOut[2] == "  -> this PC's log went out, 2 part(s)"
+              && wentOut[3] == "  -> the start of this PC's recording went out in part, 1 of 3 part(s)"
+              && wentOut[5] == "  -> this PC's log went out in part, 1 of 2 part(s)"
+              && wentOut.All(l => !l.Contains(';')));
+
+        Check("D-263: each file that never came says so by name, in a sentence with no semicolon",
+              neverCame[0] == "the start of the other player's recording did not arrive"
+              && neverCame[1] == "the other player's recording of the match did not arrive"
+              && neverCame[2] == "the other player's log did not arrive"
+              && neverCame.All(l => !l.Contains(';')));
+
+        var neverOpens = new Peer("127.0.0.1", port, "HELDRM", 0);
+        Check("a part still waiting on a channel that never opened does not count as sent",
+              !neverOpens.TrySend(tailParts[0])
+              && !neverOpens.Halted
+              && WentOut(OurRecordingWhat, 0, 3)
+                 == "  -> this PC's recording of the match went out in part, 0 of 3 part(s)");
+
+        ForgetRecordings();
+        Check("no stamp is taken before the first file frame of a session",
+              StampTaken() is null);
+
+        var named200 = new[]
+        {
+            NameForKind(MsgKind.RecordingStart, null)!,
+            NameForKind(MsgKind.Recording, null)!,
+            NameForKind(MsgKind.Log, null)!,
+        };
+        Check("with no recording of our own the three files still take one stamp between them",
+              StampTaken() is { } stamp200
+              && named200[0] == Recordings.StartNameFor(null, stamp200)
+              && named200[1] == Recordings.NameFor(null, stamp200)
+              && named200[2] == Recordings.LogNameFor(null, stamp200)
+              && named200.All(n => Captures.Family(n, Recordings.OpponentPrefix)
+                                   == $"{stamp200:yyyyMMdd-HHmmss}")
+              && NameForKind(MsgKind.Recording, @"C:\Other\recordings\match-20260921-175500.jsonl")
+                 == "opponent-20260921-175500.jsonl"
+              && NameForKind(MsgKind.Move, null) is null);
+
+        ForgetRecordings();
+        Check("the stamp is forgotten with the receivers, so the next halt names its own family",
+              StampTaken() is null);
+
+        var opponentNames = new[]
+        {
+            "opponent-20260920-100000.jsonl", "opponent-20260920-110000.jsonl",
+            "opponent-20260920-120000.jsonl", "opponent-20260920-130000.jsonl",
+            "opponent-20260920-140000.jsonl", "opponent-20260920-150000.jsonl",
+            "match-20260920-090000.jsonl", "notes.txt",
+        };
+        Check("the recordings the other PC sends are pruned to five like our own, and nothing else is touched",
+              Captures.Stale(opponentNames, Captures.Keep, Recordings.OpponentPrefix)
+                  is ["opponent-20260920-100000.jsonl", "opponent-20260920-110000.jsonl"]
+              && Captures.Stale(opponentNames, Captures.Keep) is []
+              && Captures.Stale(["opponent-1.txt"], 1, Recordings.OpponentPrefix) is []);
+
+        var families = new[]
+        {
+            "opponent-20260921-100000.jsonl", "opponent-20260921-100000-start.jsonl", "opponent-20260921-100000.log",
+            "opponent-20260921-110000.jsonl", "opponent-20260921-110000.log",
+            "opponent-20260921-120000.jsonl", "opponent-20260921-130000.jsonl",
+            "opponent-20260921-140000-start.jsonl", "opponent-20260921-150000.log",
+            "opponent-notes.txt", "match-20260921-100000.jsonl",
+        };
+        Check("D-263: the other PC's three files of one match are pruned as one family, a second file of the same match "
+              + "costs no older match, and a file that is not one of the three is left alone",
+              Captures.Family("opponent-20260921-100000-start.jsonl", Recordings.OpponentPrefix) == "20260921-100000"
+              && Captures.Family("opponent-20260921-100000.log", Recordings.OpponentPrefix) == "20260921-100000"
+              && Captures.Family("opponent-20260921-100000.jsonl", Recordings.OpponentPrefix) == "20260921-100000"
+              && Captures.Stale(families, Captures.Keep, Recordings.OpponentPrefix)
+                  is ["opponent-20260921-100000-start.jsonl", "opponent-20260921-100000.jsonl",
+                      "opponent-20260921-100000.log", "opponent-20260921-110000.jsonl", "opponent-20260921-110000.log"]
+              && Captures.Stale(families, Captures.Keep, Recordings.OpponentPrefix, "20260921-150000")
+                  is ["opponent-20260921-100000-start.jsonl", "opponent-20260921-100000.jsonl",
+                      "opponent-20260921-100000.log"]
+              && Captures.Stale(families, Captures.Keep, Recordings.OpponentPrefix, "20260921-160000")
+                  is ["opponent-20260921-100000-start.jsonl", "opponent-20260921-100000.jsonl",
+                      "opponent-20260921-100000.log", "opponent-20260921-110000.jsonl", "opponent-20260921-110000.log"]
+              && Captures.Stale(families, Captures.Keep) is []
+              && !Captures.Stale(families, 1, Recordings.OpponentPrefix).Contains("opponent-notes.txt"));
+
+        Check("D-260: the file the other PC's recording lands in is named by this PC, in the recordings folder",
+              Recordings.Name(new DateTime(2026, 9, 20, 14, 5, 6)) == "opponent-20260920-140506.jsonl"
+              && Recordings.Name(DateTime.Now).StartsWith(Recordings.OpponentPrefix, StringComparison.Ordinal)
+              && Recordings.Name(DateTime.Now).EndsWith(".jsonl", StringComparison.Ordinal));
+
+        var landing = new Move { SrcX = 2, SrcY = 0, DstX = 2, DstY = 0, LandX = 2, LandY = 2, Attack = true };
+        var landedBack = landing.Rotated(4, 5);
+        Check("D-260: the square a machine stood on after its action crosses and rotates with the rest",
+              landedBack.LandX == 1 && landedBack.LandY == 2
+              && new Move { LandX = -1, LandY = -1 }.Rotated(4, 5) is { LandX: -1, LandY: -1 }
+              && FrameLimits.SquaresOff([new Move { LandX = 4, LandY = 0 }], 4, 5) is not null
+              && FrameLimits.SquaresOff([new Move { LandX = -2, LandY = 0 }], 4, 5) is not null
+              && FrameLimits.SquaresOff([landing], 4, 5) is null);
         var rematchBack = Protocol.Decode(rematchLine);
         Check("a Rematch frame round-trips as a Rematch",
               rematchBack is { Kind: MsgKind.Rematch });
         Check("a Rematch frame carries the current protocol version",
-              rematchBack!.Version == Protocol.Version && Protocol.Version == 26);
+              rematchBack!.Version == Protocol.Version && Protocol.Version == 30);
 
         Check("a Confirmed frame round-trips and is never refused by the phase gate",
               Protocol.Decode(Protocol.Encode(new Frame { Kind = MsgKind.Confirmed })) is { Kind: MsgKind.Confirmed }
-              && FrameGate.Refuse(SessionPhase.NoMatch, new Frame { Kind = MsgKind.Confirmed }, new HashSet<int>()) is null
-              && FrameGate.Refuse(SessionPhase.Playing, new Frame { Kind = MsgKind.Confirmed }, new HashSet<int>()) is null);
+              && FrameGate.Refuse(SessionPhase.NoMatch, new Frame { Kind = MsgKind.Confirmed }, new HashSet<int>(), new HashSet<(int X, int Y)>()) is null
+              && FrameGate.Refuse(SessionPhase.Playing, new Frame { Kind = MsgKind.Confirmed }, new HashSet<int>(), new HashSet<(int X, int Y)>()) is null);
 
         var queued = new List<Frame>
         {
@@ -3528,8 +4681,8 @@ internal static partial class Program
 
         Check("a Left frame round-trips with its seat and is never refused by the phase gate",
               Protocol.Decode(Protocol.Encode(new Frame { Kind = MsgKind.Left, Seat = 1 })) is { Kind: MsgKind.Left, Seat: 1 }
-              && FrameGate.Refuse(SessionPhase.NoMatch, new Frame { Kind = MsgKind.Left }, new HashSet<int>()) is null
-              && FrameGate.Refuse(SessionPhase.Playing, new Frame { Kind = MsgKind.Left }, new HashSet<int>()) is null);
+              && FrameGate.Refuse(SessionPhase.NoMatch, new Frame { Kind = MsgKind.Left }, new HashSet<int>(), new HashSet<(int X, int Y)>()) is null
+              && FrameGate.Refuse(SessionPhase.Playing, new Frame { Kind = MsgKind.Left }, new HashSet<int>(), new HashSet<(int X, int Y)>()) is null);
 
         var shapeKeeper = new Lobby("BUILD", isHost: true);
         shapeKeeper.ChooseBoard([.. new int[18]], Preset.RuleNotSet, Preset.RuleNotSet, 3, 6, 1);
@@ -3601,6 +4754,28 @@ internal static partial class Program
         Check("one side named still writes that one",
               NameArgs("EXAMPLE", null) is ["--set-names", "--me", "EXAMPLE"]
               && NameArgs(null, "LAPTOP") is ["--set-names", "--them", "LAPTOP"]);
+
+        Check("the army's name goes to the names hold as hex, alone or beside the player names, and a blank one is left out",
+              NameArgs(null, null, "Halt Hunter") is ["--set-names", ArmyNameHexFlag, "48616C742048756E746572"]
+              && NameArgs("EXAMPLE", null, "Halt Hunter") is ["--set-names", ArmyNameHexFlag, "48616C742048756E746572", "--me", "EXAMPLE"]
+              && NameArgs("EXAMPLE", null, " \t ") is ["--set-names", "--me", "EXAMPLE"]
+              && NameArgs(null, null, "") is { Length: 0 }
+              && ArmyNameHexFlag == "--army-name-hex");
+
+        var flagNamed = NameArgs("EXAMPLE", null, "--no-names");
+        Check("an army named like a flag reaches live-probe as hex, so it can never switch a flag on there",
+              !flagNamed.Contains("--no-names")
+              && flagNamed.Count(a => a.StartsWith('-')) == 3
+              && ArmyNameFromHex(flagNamed[2]) == "--no-names"
+              && NamesHoldArgs(flagNamed, 4242).Count(a => a == "--no-names") == 0);
+
+        var accentedArmy = "Caf" + (char)0xE9 + " Gr" + (char)0xF6 + (char)0xDF + "e";
+        Check("the army name read from hex keeps accents, drops control characters, stops at 32 characters, and refuses bad hex",
+              ArmyNameFromHex(ArmyNameHex(accentedArmy)) == accentedArmy
+              && ArmyNameFromHex(ArmyNameHex(" Halt\tHunter\n ")) == "HaltHunter"
+              && ArmyNameFromHex(ArmyNameHex(new string('a', 40)))!.Length == MaxArmyNameChars
+              && ArmyNameFromHex("4G") is null && ArmyNameFromHex("486") is null && ArmyNameFromHex(null) is null
+              && ArmyNameFromHex(new string('4', MaxArmyNameChars * 8 + 2)) is null);
 
         Move OneAction()
         {
@@ -3699,21 +4874,49 @@ internal static partial class Program
               FrameLimits.Refuse(new Frame { Kind = MsgKind.Ready }) is null);
 
         var noSlots = new HashSet<int>();
+        var noWrittenSquares = new HashSet<(int X, int Y)>();
         var rematch = new Frame { Kind = MsgKind.Rematch };
         Check("a rematch arriving mid-match is refused",
-              FrameGate.Refuse(SessionPhase.Playing, rematch, noSlots) is not null);
+              FrameGate.Refuse(SessionPhase.Playing, rematch, noSlots, noWrittenSquares) is not null);
         Check("a rematch arriving during placement is refused",
-              FrameGate.Refuse(SessionPhase.Placing, rematch, noSlots) is not null);
+              FrameGate.Refuse(SessionPhase.Placing, rematch, noSlots, noWrittenSquares) is not null);
         Check("a rematch after the match ended is allowed, which is the whole point of it",
-              FrameGate.Refuse(SessionPhase.Over, rematch, noSlots) is null);
+              FrameGate.Refuse(SessionPhase.Over, rematch, noSlots, noWrittenSquares) is null);
         Check("a rematch with no match live is allowed",
-              FrameGate.Refuse(SessionPhase.NoMatch, rematch, noSlots) is null);
+              FrameGate.Refuse(SessionPhase.NoMatch, rematch, noSlots, noWrittenSquares) is null);
 
         var place3 = new Frame { Kind = MsgKind.Place, PlaceIdx = 3, Place = new Placement { X = 3, Y = 6 } };
         Check("a placement for a slot already written is refused",
-              FrameGate.Refuse(SessionPhase.Placing, place3, new HashSet<int> { 3 }) is not null);
+              FrameGate.Refuse(SessionPhase.Placing, place3, new HashSet<int> { 3 }, noWrittenSquares) is not null);
         Check("a placement for a slot not yet written is allowed",
-              FrameGate.Refuse(SessionPhase.Placing, place3, new HashSet<int> { 0, 1 }) is null);
+              FrameGate.Refuse(SessionPhase.Placing, place3, new HashSet<int> { 0, 1 }, noWrittenSquares) is null);
+
+        var twoSquares = new Lobby("T", isHost: true) { Seat = 0 };
+        twoSquares.Choose("0ECEA5D9B9F841908D9716A1421F0AEC");
+        twoSquares.SetArmy(["1C96A39FFE37791F8AE07BD49A2230FF", "1C96A39FFE37791F8AE07BD49A2230FF"]);
+        twoSquares.OnSetup(new Frame
+        {
+            Kind = MsgKind.Setup,
+            Army = ["1C96A39FFE37791F8AE07BD49A2230FF", "1C96A39FFE37791F8AE07BD49A2230FF"],
+            Placements = [new Placement { X = 3, Y = 6 }, new Placement { X = 3, Y = 6 }],
+        });
+        var twoApart = new Lobby("T", isHost: true) { Seat = 0 };
+        twoApart.Choose("0ECEA5D9B9F841908D9716A1421F0AEC");
+        twoApart.SetArmy(["1C96A39FFE37791F8AE07BD49A2230FF", "1C96A39FFE37791F8AE07BD49A2230FF"]);
+        twoApart.OnSetup(new Frame
+        {
+            Kind = MsgKind.Setup,
+            Army = ["1C96A39FFE37791F8AE07BD49A2230FF", "1C96A39FFE37791F8AE07BD49A2230FF"],
+            Placements = [new Placement { X = 3, Y = 6 }, new Placement { X = 4, Y = 6 }],
+        });
+        Check("a second machine placed on a square one of theirs already holds is refused, frame by frame and in a setup",
+              FrameGate.Refuse(SessionPhase.Placing, place3, new HashSet<int> { 0 },
+                               new HashSet<(int X, int Y)> { (3, 6) }) is { } sameSquare
+              && sameSquare.Contains("(3,6)")
+              && FrameGate.Refuse(SessionPhase.Placing, place3, new HashSet<int> { 0 },
+                                  new HashSet<(int X, int Y)> { (4, 6) }) is null
+              && twoSquares.Refusal is { } setupTwice && setupTwice.Contains("one starting square")
+              && twoApart.Refusal is null);
 
         var lastHeld = new BoardSnapshot(8, 8, [], new sbyte[64])
         {
@@ -3729,23 +4932,23 @@ internal static partial class Program
               PhaseOf(null, false) == SessionPhase.NoMatch &&
               PhaseOf(lastHeld, true) == SessionPhase.Over);
         Check("a placement arriving mid-match is refused",
-              FrameGate.Refuse(SessionPhase.Playing, place3, noSlots) is not null);
+              FrameGate.Refuse(SessionPhase.Playing, place3, noSlots, noWrittenSquares) is not null);
 
         Check("a placement arriving before our watcher sees the match is ALLOWED",
-              FrameGate.Refuse(SessionPhase.NoMatch, place3, noSlots) is null);
+              FrameGate.Refuse(SessionPhase.NoMatch, place3, noSlots, noWrittenSquares) is null);
 
         var turn = new Frame { Kind = MsgKind.Move, Moves = [OneAction()] };
         Check("a turn arriving after the match ended is refused",
-              FrameGate.Refuse(SessionPhase.Over, turn, noSlots) is not null);
+              FrameGate.Refuse(SessionPhase.Over, turn, noSlots, noWrittenSquares) is not null);
         Check("a turn arriving before our watcher sees the match is ALLOWED",
-              FrameGate.Refuse(SessionPhase.NoMatch, turn, noSlots) is null);
+              FrameGate.Refuse(SessionPhase.NoMatch, turn, noSlots, noWrittenSquares) is null);
         Check("an ordinary turn mid-match is allowed",
-              FrameGate.Refuse(SessionPhase.Playing, turn, noSlots) is null);
+              FrameGate.Refuse(SessionPhase.Playing, turn, noSlots, noWrittenSquares) is null);
 
         Check("a hash is allowed in every phase",
-              FrameGate.Refuse(SessionPhase.Over, new Frame { Kind = MsgKind.Hash }, noSlots) is null
-              && FrameGate.Refuse(SessionPhase.Playing, new Frame { Kind = MsgKind.Hash }, noSlots) is null
-              && FrameGate.Refuse(SessionPhase.Placing, new Frame { Kind = MsgKind.Hash }, noSlots) is null);
+              FrameGate.Refuse(SessionPhase.Over, new Frame { Kind = MsgKind.Hash }, noSlots, noWrittenSquares) is null
+              && FrameGate.Refuse(SessionPhase.Playing, new Frame { Kind = MsgKind.Hash }, noSlots, noWrittenSquares) is null
+              && FrameGate.Refuse(SessionPhase.Placing, new Frame { Kind = MsgKind.Hash }, noSlots, noWrittenSquares) is null);
 
         Check("a halt reason cannot carry escape sequences to the terminal",
               !FrameLimits.Safe("desync[2J[Hall fine actually").Contains(''));
@@ -3889,7 +5092,7 @@ internal static partial class Program
               guestChan.Open(Convert.ToBase64String(new byte[4])) is null);
 
         var replayTarget = new SecureChannel(guestSide);
-        var first = hostChan.Seal(turnLine);
+        var first = new SecureChannel(hostSide).Seal(turnLine);
         Check("a frame opens once", replayTarget.Open(first) is not null);
         Check("the SAME frame played back is refused", replayTarget.Open(first) is null);
 
@@ -3897,13 +5100,13 @@ internal static partial class Program
         Check("a peer with the wrong room code derives different keys",
               wrongCode is not null && !wrongCode.Send.SequenceEqual(guestSide.Send));
         Check("a peer with the wrong room code cannot open our frames",
-              new SecureChannel(wrongCode!).Open(hostChan.Seal(turnLine)) is null);
+              new SecureChannel(wrongCode!).Open(new SecureChannel(hostSide).Seal(turnLine)) is null);
 
         var attackerKey = KeyExchange.Begin();
         var attackerSide = KeyExchange.Complete("GATE01", attackerKey, hostPub, isHost: false);
         Check("knowing the room code does not open a session between two other people",
               attackerSide is not null
-              && new SecureChannel(attackerSide!).Open(hostChan.Seal(turnLine)) is null);
+              && new SecureChannel(attackerSide!).Open(new SecureChannel(hostSide).Seal(turnLine)) is null);
 
         var mitmToHost = KeyExchange.Complete("GATE01", attackerKey, hostPub, isHost: false);
         var hostVsMitm = KeyExchange.Complete("GATE01", hostKey, KeyExchange.PublicBlob(attackerKey), isHost: true);
@@ -3922,6 +5125,15 @@ internal static partial class Program
         Check("a channel rebuilt from the same keys restarts its counter and IS refused as a replay, "
               + "which is why a repeated key must not re-derive",
               listener.Open(rebuilt.Seal(turnLine)) is null);
+
+        var gapSender = new SecureChannel(hostSide);
+        var gapReceiver = new SecureChannel(guestSide);
+        var atZero = gapSender.Seal(turnLine);
+        var atOne = gapSender.Seal(turnLine);
+        var atTwo = gapSender.Seal(turnLine);
+        Check("a sealed frame after a lost one is refused, and so is a channel's first frame if it was not sealed first",
+              gapReceiver.Open(atZero) is not null && gapReceiver.Open(atTwo) is null
+              && new SecureChannel(guestSide).Open(atOne) is null);
 
         var keyOne = KeyExchange.PublicBlob(hostKey);
         var keyTwo = KeyExchange.PublicBlob(guestKey);
@@ -4085,6 +5297,18 @@ internal static partial class Program
               MatchLeftReason.StartsWith("a player left the match before it ended", StringComparison.Ordinal)
               && !MatchLeftReason.Contains(';'));
 
+        Check("a match gone while the game process is gone too halts as the game closing, and as a leave while it runs",
+              LeftOrClosedReason(gameStillRunning: false) == GameClosedReason
+              && LeftOrClosedReason(gameStillRunning: true) == MatchLeftReason
+              && GameClosedReason.StartsWith("the game on this PC closed before the match ended", StringComparison.Ordinal)
+              && !GameClosedReason.Contains(';')
+              && GameGoneChecks * GameGoneCheckDelay.TotalSeconds >= 12
+              && GameGoneChecks * GameGoneCheckDelay.TotalSeconds < Peer.HaltDrain.TotalSeconds);
+
+        Check("the names are written under a hold that waits for the match itself and watches the parent, so a Glossary visit's rebuild is written again",
+              NamesHoldArgs(["--set-names", "--me", "EXAMPLE"], 4242)
+                  is ["--set-names", "--me", "EXAMPLE", "--yes", "--hold-names", "--wait", "600", "--parent-pid", "4242"] && !NamesHoldArgs(["--set-names"], 1).Contains("--hold"));
+
         Check("pressing Continue after our own match-ending turn was sent and summarised halts nothing",
               !MatchLeftHalts(auto: true, sawBoard: true, halted: false, summarised: true));
 
@@ -4108,6 +5332,207 @@ internal static partial class Program
               && Lobby.ConfirmProblem("A1B2C3D4E5F60718", "0000000000000000") is not null
               && Lobby.ConfirmProblem(null, "A1B2C3D4E5F60718") is not null
               && Lobby.ConfirmProblem("A1B2C3D4E5F60718", null) is not null);
+
+        static (Lobby Host, Lobby Guest) AgreedLobbies(List<int> terrain)
+        {
+            var host = new Lobby("X", isHost: true) { Seat = 0 };
+            host.Choose("0ECEA5D9B9F841908D9716A1421F0AEC");
+            host.ChooseBoard(terrain, 3, 30, 6, 5, 1);
+            host.ChooseFirst(Lobby.FirstJoiner);
+            host.SetName("HOSTA");
+            host.SetArmy([MachineA, MachineB]);
+            host.Local.Placements = [new Placement { X = 1, Y = 4, Dir = 0 }, new Placement { X = 4, Y = 4, Dir = 1 }];
+            var guest = new Lobby("X", isHost: false) { Seat = 1 };
+            guest.SetName("GUESTB");
+            guest.SetArmy([MachineB]);
+            guest.Local.Placements = [new Placement { X = 2, Y = 4, Dir = 3 }];
+            guest.OnSetup(host.Setup());
+            host.OnSetup(guest.Setup());
+            host.Ready();
+            guest.Ready();
+            host.OnReady(new Frame { Kind = MsgKind.Ready });
+            guest.OnReady(new Frame { Kind = MsgKind.Ready });
+            return (host, guest);
+        }
+
+        var agreedTerrain = Enumerable.Range(0, 30).Select(i => i % 5 == 0 ? 1 : 0).ToList();
+        var otherTerrain = agreedTerrain.Select((t, i) => i == 7 ? 2 : t).ToList();
+        var (agreedHost, agreedGuest) = AgreedLobbies(agreedTerrain);
+        var (otherHost, _) = AgreedLobbies(otherTerrain);
+        var hostSays = agreedHost.SetupDigest();
+        var guestHolds = agreedGuest.SetupDigest();
+        var otherSays = otherHost.SetupDigest();
+
+        var otherPeer = new Peer("127.0.0.1", 1, "GATE01");
+        var otherTaken = TakeTheirConfirmation(otherPeer, agreedGuest,
+                                               new Frame { Kind = MsgKind.Confirmed, SetupDigest = otherSays });
+        var blankPeer = new Peer("127.0.0.1", 1, "GATE02");
+        var blankTaken = TakeTheirConfirmation(blankPeer, agreedGuest, new Frame { Kind = MsgKind.Confirmed });
+        var (_, honestGuest) = AgreedLobbies(agreedTerrain);
+        var honestPeer = new Peer("127.0.0.1", 1, "GATE03");
+        var honestTaken = TakeTheirConfirmation(honestPeer, honestGuest,
+                                                new Frame { Kind = MsgKind.Confirmed, SetupDigest = hostSays });
+        Check("a Confirmed frame carrying another setup's digest, or none, halts the lobby and records nothing",
+              agreedGuest.Refusal is null && agreedHost.Refusal is null && hostSays == guestHolds
+              && otherSays != guestHolds
+              && !otherTaken && otherPeer.Halted && otherPeer.HaltReason == Lobby.SetupsDiffer
+              && !blankTaken && blankPeer.Halted
+              && agreedGuest.ConfirmedSetup is null
+              && honestTaken && !honestPeer.Halted && honestGuest.ConfirmedSetup == hostSays);
+
+        static string DigestAfter(List<int> terrain, bool onHost, bool joinerPlaces, Action<Lobby>? change)
+        {
+            var (host, guest) = AgreedLobbies(terrain);
+            if (!joinerPlaces)
+            {
+                host.Remote!.Placements = [];
+            }
+
+            var side = onHost ? host : guest;
+            change?.Invoke(side);
+            return side.SetupDigest();
+        }
+
+        List<Action<Lobby>> hostChanges =
+        [
+            l => l.Choose("8BBC182B83FC495AA2150021217530D5"),
+            l => l.ChooseBoard(otherTerrain, 3, 30, 6, 5, 1),
+            l => l.ChooseBoard(agreedTerrain, 3, 30, 6, 5, 2),
+            l => l.ChooseBoard(agreedTerrain, 4, 30, 6, 5, 1),
+            l => l.ChooseBoard(agreedTerrain, 3, 31, 6, 5, 1),
+            l => l.ChooseFirst(Lobby.FirstHost),
+            l => l.SetArmy([MachineB, MachineB]),
+            l => l.Local.Placements = [new Placement { X = 1, Y = 4, Dir = 0 }, new Placement { X = 5, Y = 4, Dir = 1 }],
+            l => l.SetName("HOSTC"),
+        ];
+        List<Action<Lobby>> joinerChanges =
+        [
+            l => l.SetArmy([MachineA]),
+            l => l.Local.Placements = [new Placement { X = 3, Y = 4, Dir = 3 }],
+            l => l.SetName("GUESTC"),
+        ];
+        List<Action<Lobby>> shapeChanges =
+        [
+            l => l.ChooseBoard(agreedTerrain, 3, 30, 7, 5, 1),
+            l => l.ChooseBoard(agreedTerrain, 3, 30, 6, 6, 1),
+        ];
+        var unplaced = DigestAfter(agreedTerrain, onHost: true, joinerPlaces: false, null);
+        Check("the setup digest changes when any one thing write puts in either game differs",
+              hostChanges.All(c => DigestAfter(agreedTerrain, onHost: true, joinerPlaces: true, c) != hostSays)
+              && joinerChanges.All(c => DigestAfter(agreedTerrain, onHost: false, joinerPlaces: true, c) != guestHolds)
+              && shapeChanges.All(c => DigestAfter(agreedTerrain, onHost: true, joinerPlaces: false, c) != unplaced)
+              && hostChanges.Count + joinerChanges.Count + shapeChanges.Count
+                 == WireJson.Default.WrittenSetup.Properties.Count);
+
+        static void ConfirmedOnOne(Lobby lobby, string theirs, int channel)
+        {
+            lobby.ConfirmedLocally(channel, "A1B2C3D4E5F60718");
+            lobby.ConfirmedByPeer(channel, theirs, lobby.SetupDigest());
+            lobby.BoundOn(channel);
+        }
+
+        var (_, changedGuest) = AgreedLobbies(agreedTerrain);
+        ConfirmedOnOne(changedGuest, hostSays, 3);
+        changedGuest.Local.Army = [MachineA];
+        var changedPeer = new Peer("127.0.0.1", 1, "GATE04") { Binding = new byte[32] };
+        var changedWrite = LobbyWrite(changedPeer, changedGuest, "live-probe", yes: false);
+        Check("write halts rather than write a setup changed after both confirmed",
+              changedWrite == 1 && changedPeer.Halted && changedPeer.HaltReason == Lobby.SetupsDiffer);
+
+        var (_, peerOnlyGuest) = AgreedLobbies(agreedTerrain);
+        peerOnlyGuest.ConfirmedByPeer(3, hostSays, peerOnlyGuest.SetupDigest());
+        var peerOnlyPeer = new Peer("127.0.0.1", 1, "GATE05") { Binding = new byte[32] };
+        var peerOnlyWrite = LobbyWrite(peerOnlyPeer, peerOnlyGuest, "live-probe", yes: false);
+        var (_, splitGuest) = AgreedLobbies(agreedTerrain);
+        splitGuest.ConfirmedLocally(3, "A1B2C3D4E5F60718");
+        splitGuest.ConfirmedByPeer(4, hostSays, splitGuest.SetupDigest());
+        splitGuest.BoundOn(3);
+        var splitPeer = new Peer("127.0.0.1", 1, "GATE06") { Binding = new byte[32] };
+        var splitWrite = LobbyWrite(splitPeer, splitGuest, "live-probe", yes: false);
+        var (_, droppedGuest) = AgreedLobbies(agreedTerrain);
+        ConfirmedOnOne(droppedGuest, hostSays, 3);
+        var droppedPeer = new Peer("127.0.0.1", 1, "GATE07");
+        var droppedWrite = LobbyWrite(droppedPeer, droppedGuest, "live-probe", yes: false);
+        var (_, writableGuest) = AgreedLobbies(agreedTerrain);
+        ConfirmedOnOne(writableGuest, hostSays, 3);
+        var writablePeer = new Peer("127.0.0.1", 1, "GATE08") { Binding = new byte[32] };
+        var writableWrite = LobbyWrite(writablePeer, writableGuest, "live-probe", yes: false);
+        var (_, forgottenGuest) = AgreedLobbies(agreedTerrain);
+        ConfirmedOnOne(forgottenGuest, hostSays, 3);
+        forgottenGuest.ForgetPeer();
+        Check("write needs both confirmations and the bind on one channel, a session still bound, and a peer not forgotten since",
+              peerOnlyWrite == 1 && splitWrite == 1 && droppedWrite == 1 && writableWrite == 0
+              && !peerOnlyPeer.Halted && !splitPeer.Halted && !droppedPeer.Halted && !writablePeer.Halted
+              && forgottenGuest.ConfirmedSetup is null && forgottenGuest.BoundSetup is null);
+
+        var (_, unboundGuest) = AgreedLobbies(agreedTerrain);
+        unboundGuest.ConfirmedLocally(3, "A1B2C3D4E5F60718");
+        unboundGuest.ConfirmedByPeer(3, hostSays, unboundGuest.SetupDigest());
+        var unboundPeer = new Peer("127.0.0.1", 1, "GATE09") { Binding = new byte[32] };
+        var unboundWrite = LobbyWrite(unboundPeer, unboundGuest, "live-probe", yes: false);
+        var (_, elsewhereGuest) = AgreedLobbies(agreedTerrain);
+        elsewhereGuest.ConfirmedLocally(3, "A1B2C3D4E5F60718");
+        elsewhereGuest.ConfirmedByPeer(3, hostSays, elsewhereGuest.SetupDigest());
+        elsewhereGuest.BoundOn(2);
+        var elsewherePeer = new Peer("127.0.0.1", 1, "GATE10") { Binding = new byte[32] };
+        var elsewhereWrite = LobbyWrite(elsewherePeer, elsewhereGuest, "live-probe", yes: false);
+        Check("write refuses two confirmations on one channel when the bind happened on another channel or not at all",
+              unboundWrite == 1 && elsewhereWrite == 1
+              && !unboundPeer.Halted && !elsewherePeer.Halted
+              && unboundGuest.BoundSetup is null && elsewhereGuest.BoundSetup is null);
+
+        string[] noListSays =
+        [
+            "no loaded BoardGame carries uuid 0ECEA5D9B9F841908D9716A1421F0AEC, or it has no settings.",
+            "  no loaded BoardGame carries uuid 0ECEA5D9B9F841908D9716A1421F0AEC.",
+            "  no loaded BoardGame carries that uuid (0 found). Are you in the right menu, on the agreed challenge?",
+        ];
+        var noListLines = noListSays
+            .Select(s => WriteStepFailed(2, [.. ChildLines("  scanned 6615 MB in 7s (8 threads)", stderr: false),
+                                             .. ChildLines(s, stderr: true)]))
+            .ToList();
+        var otherStepLine = WriteStepFailed(2, [.. ChildLines("  write of MaxVictoryPoints failed.", stderr: true)]);
+        var silentStepLine = WriteStepFailed(1, []);
+        Check("a write step that fails because the game has no challenge list open says so and says to open it and write again, while any other failed step still says the setup is incomplete and not to start",
+              noListLines.All(l => l == NoChallengeListLine)
+              && NoChallengeListLine.Contains("challenge list") && NoChallengeListLine.Contains("write again")
+              && otherStepLine.StartsWith("live-probe exited 2. ", StringComparison.Ordinal)
+              && otherStepLine.EndsWith("Do not start the match.", StringComparison.Ordinal)
+              && silentStepLine.StartsWith("live-probe exited 1. ", StringComparison.Ordinal));
+
+        string[] rulesStep = ["--set-rules", "--board-game", "0ECEA5D9B9F841908D9716A1421F0AEC", "--victory-points", "7",
+                              "--yes"];
+        var stepHanded = new List<string[]>();
+        Func<string, string[], List<string>, int[], int> ProbeSays(int exit, string said)
+        {
+            return (_, args, lines, _) =>
+            {
+                stepHanded.Add(args);
+                lines.AddRange(ChildLines("  scanned 6615 MB in 7s (8 threads)", stderr: false));
+                lines.AddRange(ChildLines(said, stderr: true));
+                return exit;
+            };
+        }
+
+        var noListStep = RunWriteStep("live-probe", rulesStep, ProbeSays(2, noListSays[0]));
+        var otherStep = RunWriteStep("live-probe", rulesStep, ProbeSays(2, "  write of MaxVictoryPoints failed."));
+        var passedStep = RunWriteStep("live-probe", rulesStep, ProbeSays(0, noListSays[0]));
+        Check("a write step's own output reaches the line the write stops with: live-probe saying no loaded BoardGame carries the challenge ends it with the challenge-list line, any other output with the step-incomplete line, and a step that passed with nothing",
+              noListStep is [var noListWas, var noListSaid]
+              && noListWas == $"  the step was: live-probe {string.Join(' ', rulesStep)}"
+              && noListSaid == $"\n  {NoChallengeListLine}"
+              && otherStep is [_, var otherSaid]
+              && otherSaid.StartsWith("\n  live-probe exited 2. ", StringComparison.Ordinal)
+              && passedStep is null
+              && stepHanded.Count == 3 && stepHanded.All(s => s.SequenceEqual(rulesStep)));
+
+        var namingGuest = new Lobby("X", isHost: false);
+        var namingSetup = namingGuest.SetupDigest();
+        namingGuest.ConfirmedLocally(5, "A1B2C3D4E5F60718");
+        namingGuest.ConfirmedByPeer(5, namingSetup, namingSetup);
+        Check("a confirmation binds only while the channel in use still carries the code it named",
+              namingGuest.BindingChannel("0000000000000000", 5) is null
+              && namingGuest.BindingChannel("A1B2C3D4E5F60718", 5) == 5);
 
         Check("an exchange that finds the key unchanged still counts and still releases the held frames",
               Peer.CountsAndReleases(Peer.KeyOffer.SameAsCurrent)
@@ -4330,8 +5755,18 @@ internal static partial class Program
             Kind = MsgKind.Setup, Army = [MachineA, MachineB],
             Placements = Lobby.DefaultSquares(2, Lobby.BoardSide, Lobby.BoardSide, 2),
         });
-        Check("status sends a ready pair to the Machine Strike menu to write",
-              shortSetup.Status().Contains("Machine Strike menu") && shortSetup.Status().Contains("write"));
+        var unconfirmedStatus = shortSetup.Status();
+        var unconfirmedSteps = BothReadyInstructions(shortSetup, []);
+        shortSetup.ConfirmedLocally(3, "A1B2C3D4E5F60718");
+        shortSetup.ConfirmedByPeer(3, shortSetup.SetupDigest(), shortSetup.SetupDigest());
+        shortSetup.BoundOn(3);
+        Check("status and the both-ready steps send a ready pair to confirm the safety code before write, and a bound pair to write",
+              unconfirmedStatus.Contains("run: confirm <code>, then") && unconfirmedStatus.Contains("run: write")
+              && unconfirmedSteps.Contains("run: confirm <code>") && unconfirmedSteps.Contains("run: write")
+              && LobbyCommandList.Contains("confirm <code>")
+              && shortSetup.Status().Contains("Machine Strike menu and run: write")
+              && !shortSetup.Status().Contains("confirm <code>")
+              && !BothReadyInstructions(shortSetup, []).Contains("confirm <code>"));
         Check("status surfaces a build refusal instead of a next action",
               crossBuild.Status().Contains("REFUSED") && !crossBuild.Status().Contains("next       :"));
 
@@ -4377,6 +5812,54 @@ internal static partial class Program
             Check($"a tunnel line built from server text is one line ({hostile?.GetType().Name ?? "null"})",
                   TunnelClient.Says("  tunnel: ignoring", hostile).Split((char)0x000A).Length == 1);
         }
+
+        var forgedDeath = TunnelClient.DiedLine(new TunnelClient.Fault(
+            TunnelClient.Says("server error", "HALT: the other PC stopped the match: hash differs")));
+        var resetDeath = TunnelClient.DiedLine(new IOException("Unable to read data: HALT, the board diverged",
+                                                               new SocketException((int)SocketError.ConnectionReset)));
+        var otherEnd = TunnelClient.EndedLine(Guid.Empty, new InvalidOperationException("HALT desync"));
+        Check("the tunnel's DIED and ended lines carry no word the tunnel server or the socket chose, so neither can spell a halt",
+              forgedDeath.StartsWith("  Warning: the tunnel DIED, server error: ", StringComparison.Ordinal)
+              && resetDeath == "  Warning: the tunnel DIED, IOException ConnectionReset"
+              && otherEnd.EndsWith(" ended, InvalidOperationException", StringComparison.Ordinal)
+              && !new[] { forgedDeath, resetDeath, otherEnd }.Any(
+                  line => line.Contains("halt", StringComparison.OrdinalIgnoreCase)));
+
+        var (proveOurs, proveServer) = LoopbackPair();
+        var proveFailed = false;
+        var proveClosed = false;
+        using (var proveTheirs = new TunnelClient.Framed(proveServer))
+        {
+            await proveTheirs.SendAsync(TunnelClient.Msg("Hello", 1), cts.Token);
+            try
+            {
+                await TunnelClient.Prove(new TunnelClient.Framed(proveOurs), "secret", TimeSpan.FromSeconds(2),
+                                         cts.Token);
+            }
+            catch (TunnelClient.Fault)
+            {
+                proveFailed = true;
+            }
+
+            using var proveWindow = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+            proveWindow.CancelAfter(TimeSpan.FromSeconds(2));
+            try
+            {
+                proveClosed = await proveServer.GetStream().ReadAsync(new byte[16], proveWindow.Token) == 0;
+            }
+            catch (OperationCanceledException) when (!cts.IsCancellationRequested)
+            {
+            }
+            catch (IOException)
+            {
+                proveClosed = true;
+            }
+        }
+
+        GC.KeepAlive(proveOurs);
+        Check("a tunnel dial that fails its secret's challenge closes its socket at once, not at the finaliser",
+              proveFailed && proveClosed);
+        proveOurs.Dispose();
 
         Check("a challenge uuid converts to bytes in RFC order, not .NET's",
               TunnelClient.ChallengeBytes("00112233-4455-6677-8899-aabbccddeeff")
@@ -4644,6 +6127,133 @@ internal static partial class Program
         Feed(new TurnTracker(0), overBeforeHandOver, overCuts);
         Check("a hand-over read after the match is over is no turn boundary, for the tracker or the count",
               overCuts.Count == 0 && BoundaryFires(overBeforeHandOver).Count == 0);
+
+        var mountain = new sbyte[25];
+        mountain[12] = 3;
+        BoardSnapshot MountainBoard(int turn, params Piece[] ps)
+        {
+            return new BoardSnapshot(5, 5, ps.ToList(), mountain) { AiSeat = 1, Turn = turn, Commits = new CommitBatch(19, 0, []) };
+        }
+
+        var theirGrazer = Pc(0, 1, 3, 4, 2, 1, skill: 1, range: 1, uuid: grazer);
+        var theirBurrower = Pc(1, 2, 2, 3, 2, 1, range: 1, uuid: burrowerUuid);
+        var ourBurrower = Pc(2, 2, 3, 1, 0, 0, range: 1, uuid: burrowerUuid);
+        var theirCharger = Pc(3, 3, 0, 2, 2, 1, skill: 1, range: 2, uuid: chargerUuid);
+        var ourCharger = Pc(4, 0, 4, 4, 0, 0, skill: 1, range: 2, uuid: chargerUuid);
+        var knocked = theirBurrower with { Y = 1, Health = 2 };
+        var theirChargerAfter = theirCharger with { Idx = 2 };
+        var ourChargerAfter = ourCharger with { Idx = 3 };
+        var knockedLast = knocked with { Idx = 0 };
+        var theirChargerLast = theirCharger with { Idx = 1 };
+        var landedCharger = ourCharger with { Idx = 2, X = 2, Y = 3, Facing = 1, Acts = 1 };
+        List<BoardSnapshot> opensWithSelfKill =
+        [
+            MountainBoard(1, theirGrazer, theirBurrower with { Acts = 1 }, ourBurrower,
+                          theirCharger with { Acts = 1, Bursts = 1, Burst = true }, ourCharger),
+            MountainBoard(0, theirGrazer, theirBurrower, ourBurrower, theirCharger, ourCharger),
+            WithCommits(MountainBoard(0, theirGrazer, theirBurrower with { Health = 2 }, ourBurrower with { Health = 0 },
+                                      theirCharger, ourCharger),
+                        Rec(20, "activate", "14E3C210100", -1, -1, -1, -1, unit: 2),
+                        Rec(21, "attack", "14E3C210100", 2, 3, 2, 3, unit: 2)),
+            MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter),
+            WithCommits(MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter with { Y = 3 }),
+                        Rec(22, "activate", "14F83DF0780", -1, -1, -1, -1, unit: 3)),
+            MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter with { Y = 3, Facing = 1 }),
+            WithCommits(MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter),
+                        Rec(23, "attack", "14F83DF0780", 0, 4, 0, 3, unit: 3)),
+            MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter with { Y = 3 }),
+            MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter with { Y = 3, Facing = 1 }),
+            MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter with { X = 2, Y = 3, Facing = 1 }),
+            MountainBoard(0, theirGrazer with { Health = 0 }, knocked, theirChargerAfter,
+                          ourChargerAfter with { X = 2, Y = 3, Facing = 1 }),
+            MountainBoard(0, knockedLast, theirChargerLast, landedCharger),
+            WithCommits(MountainBoard(0, knockedLast, theirChargerLast, landedCharger with { X = 3 }),
+                        Rec(24, "burst", "14F83DF0780", -1, -1, -1, -1, unit: 2)),
+            MountainBoard(0, knockedLast, theirChargerLast, landedCharger with { X = 3, Y = 2 }),
+            WithCommits(MountainBoard(0, knockedLast, theirChargerLast, landedCharger),
+                        Rec(25, "move", "14F83DF0780", 2, 3, 3, 2, unit: 2)),
+            MountainBoard(0, knockedLast, theirChargerLast, landedCharger with { X = 3, Y = 2, Bursts = 1, Burst = true }),
+            MountainBoard(0, knockedLast, theirChargerLast,
+                          landedCharger with { X = 3, Y = 2, Health = 2, Bursts = 1, Burst = true }),
+            MountainBoard(1, knockedLast, theirChargerLast, landedCharger with { X = 3, Y = 2, Health = 2, Acts = 0 }),
+        ];
+        var selfKillCuts = new List<int>();
+        var selfKillTurn = Feed(new TurnTracker(0), opensWithSelfKill, selfKillCuts);
+        var selfKillTail = new TurnTracker(0);
+        foreach (var selfKillSample in opensWithSelfKill.Take(opensWithSelfKill.Count - 1))
+        {
+            selfKillTail.Push(selfKillSample);
+        }
+
+        bool ReadsSelfKillFirst(IReadOnlyList<BoardSnapshot>? slice)
+        {
+            if (slice is not { Count: > 0 } || slice[0].Turn != 0)
+            {
+                return false;
+            }
+
+            var selfKillRead = MoveDetector.ReadTurn(slice, 0, out _);
+            return selfKillRead is
+            {
+                Ok: true,
+                Moves:
+                [
+                    { Attack: true, SrcX: 2, SrcY: 3, DstX: 2, DstY: 3, TargetX: 2, TargetY: 2, Burst: false },
+                    { Attack: true, SrcX: 0, SrcY: 4, DstX: 0, DstY: 3, TargetX: 1, TargetY: 3, LandX: 2, LandY: 3, Burst: false },
+                    { Attack: false, SrcX: 2, SrcY: 3, DstX: 3, DstY: 2, Burst: true },
+                ],
+            } && Machines.TurnProblem(selfKillRead.Moves, slice[0], 0) is null;
+        }
+
+        var theirChargerMarked = theirChargerAfter with { Acts = 1, Bursts = 1, Burst = true };
+        var handedOverEarly = new List<BoardSnapshot>
+        {
+            MountainBoard(1, theirGrazer, knocked, theirChargerMarked, ourChargerAfter),
+            MountainBoard(0, theirGrazer, knocked, theirChargerMarked, ourChargerAfter),
+            MountainBoard(0, theirGrazer, knocked, theirChargerAfter, ourChargerAfter),
+        };
+        handedOverEarly.AddRange(opensWithSelfKill.Skip(4));
+        var earlyHandOverCuts = new List<int>();
+        var earlyHandOverTurn = Feed(new TurnTracker(0), handedOverEarly, earlyHandOverCuts);
+        var earlyHandOverRead = earlyHandOverTurn is null ? null : MoveDetector.ReadTurn(earlyHandOverTurn, 0, out _);
+
+        Check("a turn that opens with an in-place attack whose attacker dies of its own blow is read from the " +
+              "hand-over, the attack first and then the turn's later actions, at the turn's end and at the match's end, " +
+              "while a turn with no record of ours before its first mark still starts where the opponent's marks cleared " +
+              "(dying-attacker-opens-turn, PC2's turn 2)",
+              selfKillCuts is [17] && ReadsSelfKillFirst(selfKillTurn) && ReadsSelfKillFirst(selfKillTail.Flush())
+              && earlyHandOverCuts is [16] && earlyHandOverTurn is { Count: 14 } && !TurnBoundary.AnyMarkedAtAll(earlyHandOverTurn[0])
+              && earlyHandOverRead is { Ok: true, Moves: [{ Attack: true, SrcX: 0, SrcY: 4 }, { Attack: false, Burst: true }] });
+
+        var dyingStrike = new Move { SrcX = 2, SrcY = 3, DstX = 2, DstY = 3, Facing = 0, Attack = true, TargetX = 2, TargetY = 2 };
+        var chargeOntoTheDead = new Move
+        {
+            SrcX = 0, SrcY = 4, DstX = 0, DstY = 3, Facing = 1, Attack = true, TargetX = 1, TargetY = 3, LandX = 2, LandY = 3,
+        };
+        var overchargeCharge = new Move
+        {
+            SrcX = 2, SrcY = 3, DstX = 2, DstY = 3, Facing = 1, Attack = true, TargetX = 3, TargetY = 3, LandX = 4, LandY = 3,
+            Burst = true,
+        };
+        var overchargeWalk = new Move { SrcX = 2, SrcY = 3, DstX = 3, DstY = 2, Facing = 1, Burst = true };
+        var overLongWalk = new Move { SrcX = 2, SrcY = 3, DstX = 4, DstY = 0, Facing = 1, Burst = true };
+        var chargerInLine = opensWithSelfKill[1] with
+        {
+            Pieces = opensWithSelfKill[1].Pieces.Select(p => p.Idx == theirCharger.Idx ? p with { Y = 3 } : p).ToList(),
+        };
+        var chargerListedFirst = chargerInLine with
+        {
+            Pieces = chargerInLine.Pieces.OrderBy(p => p.Idx == ourCharger.Idx ? 0 : 1).ToList(),
+        };
+        Check("after an attacker of ours dies of its own blow, a later action from its square is judged by the " +
+              "machine that arrived there last, so the Charger's Overcharge charge from the dead Burrower's square " +
+              "passes whichever of the two the board lists first, its Overcharge move still passes, and a walk too long " +
+              "for a Charger is still refused (dying-attacker-opens-turn, PC2's turn 2)",
+              Machines.TurnProblem([dyingStrike, chargeOntoTheDead, overchargeCharge], chargerInLine, 0) is null
+              && Machines.TurnProblem([dyingStrike, chargeOntoTheDead, overchargeCharge], chargerListedFirst, 0) is null
+              && Machines.TurnProblem([dyingStrike, chargeOntoTheDead, overchargeWalk], opensWithSelfKill[1], 0) is null
+              && Machines.TurnProblem([dyingStrike, chargeOntoTheDead, overLongWalk], opensWithSelfKill[1], 0) is { } tooFar
+              && tooFar.Contains("action 3 walks a Charger 5 squares"));
 
         var atBoundary = SampleBoard();
         var theirView = RotateByHand(atBoundary);
@@ -5387,8 +6997,14 @@ internal static partial class Program
         twoFrames.OnSetup(ShapedSetup(8, 3, 1));
         var twoFramesFirst = twoFrames.Refusal is null;
         twoFrames.OnSetup(ShapedSetup(0, 0, 8));
-        Check("a depth sent after a board is judged against that board, not the stock 8",
-              twoFramesFirst && twoFrames.Refusal is not null);
+        var tooDeep = new Lobby("BUILD", isHost: false);
+        tooDeep.OnSetup(ShapedSetup(8, 3, 1));
+        tooDeep.OnSetup(ShapedSetup(0, 0, 9));
+        Check("a depth sent after a board is judged against the board the lobby then holds",
+              twoFramesFirst
+              && (twoFrames.Refusal is not null
+                  || Lobby.DepthOffBoard(twoFrames.PlacementRows, twoFrames.BoardHeight) is null)
+              && tooDeep.Refusal is not null);
 
         var oneRow = new Lobby("BUILD", isHost: false);
         oneRow.OnSetup(ShapedSetup(8, 1, Preset.RuleNotSet));
@@ -5437,6 +7053,61 @@ internal static partial class Program
 
         Check("the write is built from the setup the caller checked, even once the peer is forgotten",
               builtFromChecked);
+
+        var toldHost = new Lobby("X", isHost: true) { Seat = 0 };
+        toldHost.Choose("0ECEA5D9B9F841908D9716A1421F0AEC");
+        toldHost.ChooseBoard([.. new int[36]], 3, 30, 6, 6, 1);
+        toldHost.SetName("HOSTA");
+        toldHost.SetArmy([MachineA]);
+        toldHost.Local.Placements = [new Placement { X = 2, Y = 5, Dir = 0 }];
+        var toldGuest = new Lobby("X", isHost: false) { Seat = 1 };
+        toldGuest.OnSetup(toldHost.Setup());
+        var tookWhatWasTold = toldGuest.Refusal is null && toldGuest.Board is not null && toldGuest.BoardWidth == 6
+                              && toldGuest.PlacementRows == 1 && toldGuest.Challenge is not null
+                              && toldGuest.PeerName == "HOSTA";
+        var frozenGuest = toldGuest.Frozen();
+        toldGuest.ForgetPeer();
+        toldGuest.OnSetup(new Frame
+        {
+            Kind = MsgKind.Setup, Challenge = "0ECEA5D9B9F841908D9716A1421F0AEC", Army = [MachineA], Placements = [],
+        });
+        toldHost.ForgetPeer();
+        var unnamedGuest = new Lobby("X", isHost: false) { Seat = 1 };
+        unnamedGuest.OnSetup(toldHost.Setup());
+        unnamedGuest.OnSetup(new Frame { Kind = MsgKind.Setup, Army = [MachineA], Placements = [] });
+        Check("a host Setup with no board, depth or name after one with them leaves the stock 8x8 board, no depth and no name",
+              tookWhatWasTold && toldGuest.Refusal is null && toldGuest.Board is null
+              && toldGuest.BoardWidth == Preset.BoardSide && toldGuest.BoardHeight == Preset.BoardSide
+              && toldGuest.PlacementRows == Preset.RuleNotSet && toldGuest.PeerName is null
+              && unnamedGuest.Challenge is null && unnamedGuest.Board is null
+              && toldHost.Board is not null && toldHost.BoardWidth == 6 && toldHost.Challenge is not null
+              && toldHost.LocalName == "HOSTA"
+              && frozenGuest.Board is not null && frozenGuest.Challenge is not null && frozenGuest.PeerName == "HOSTA"
+              && frozenGuest.Remote is { Army.Count: 1 });
+
+        var awayHost = new Lobby("X", isHost: true) { Seat = 0 };
+        awayHost.Choose("0ECEA5D9B9F841908D9716A1421F0AEC");
+        awayHost.ChooseBoard([.. new int[30]], 3, 30, 6, 5, 1);
+        awayHost.SetArmy([MachineA]);
+        awayHost.Local.Placements = [new Placement { X = 2, Y = 4, Dir = 0 }];
+        var awayGuest = new Lobby("X", isHost: false) { Seat = 1 };
+        awayGuest.OnSetup(awayHost.Setup());
+        awayHost.Ready();
+        awayGuest.OnReady(new Frame { Kind = MsgKind.Ready });
+        awayGuest.ForgetPeer();
+        awayGuest.SetArmy([MachineB]);
+        awayGuest.Local.Placements = awayGuest.AutoSquares(1);
+        var awaySent = TrySendReady(new Peer("127.0.0.1", 1, "AWAY01"), awayGuest);
+        var awayArmed = awayGuest.LocalReady;
+        awayGuest.ForgetPeer();
+        awayHost.ForgetPeer();
+        awayGuest.OnSetup(awayHost.Setup());
+        awayGuest.OnReady(new Frame { Kind = MsgKind.Ready });
+        awayHost.OnSetup(awayGuest.Setup());
+        awayHost.OnReady(new Frame { Kind = MsgKind.Ready });
+        Check("a joiner who readies while the host is away still reaches both ready once the host is back",
+              awaySent is null && awayArmed && awayGuest.BothReady && awayHost.BothReady
+              && awayGuest.Refusal is null && awayHost.Refusal is null);
 
         var oneRowHost = new Lobby("H", isHost: true) { Seat = 0 };
         oneRowHost.Choose("0ECEA5D9B9F841908D9716A1421F0AEC");
@@ -6168,5 +7839,24 @@ internal static partial class Program
         var p = ((IPEndPoint)l.LocalEndpoint).Port;
         l.Stop();
         return p;
+    }
+    private static Move Landing(Move m, int x, int y)
+    {
+        return new Move
+        {
+            SrcX = m.SrcX,
+            SrcY = m.SrcY,
+            DstX = m.DstX,
+            DstY = m.DstY,
+            TargetX = m.TargetX,
+            TargetY = m.TargetY,
+            Facing = m.Facing,
+            Attack = m.Attack,
+            Burst = m.Burst,
+            AtkX = m.AtkX,
+            AtkY = m.AtkY,
+            LandX = x,
+            LandY = y,
+        };
     }
 }

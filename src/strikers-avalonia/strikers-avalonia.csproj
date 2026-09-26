@@ -15,7 +15,7 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
-    <StrikersVersion>1.0.0</StrikersVersion>
+    <StrikersVersion>1.1.0</StrikersVersion>
     <NexusModId>209</NexusModId>
   </PropertyGroup>
 
@@ -26,11 +26,6 @@
 
   <ItemGroup Condition="'$(StrikersCommit)' != ''">
     <AssemblyMetadata Include="StrikersCommit" Value="$(StrikersCommit)" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(TestBuildFor)' != ''">
-    <AssemblyMetadata Include="TestBuildFor" Value="$(TestBuildFor)" />
-    <AssemblyMetadata Include="TestBuildExpires" Value="$(TestBuildExpires)" />
   </ItemGroup>
 
   <ItemGroup>

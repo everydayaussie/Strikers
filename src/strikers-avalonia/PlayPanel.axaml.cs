@@ -2,8 +2,10 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
 using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media;
@@ -16,7 +18,6 @@ public partial class PlayPanel : UserControl
 {
     private readonly Flow flow = new();
     private readonly MatchDriver driver;
-    private readonly ReportOnce haltReport = new();
     private readonly Dictionary<Stage, Control> pages = [];
 
     private ChallengeBridge.Challenge? chosen;
@@ -26,6 +27,8 @@ public partial class PlayPanel : UserControl
         (StrikeBoard.Size, StrikeBoard.Size, -1);
 
     private List<string> army = [];
+
+    private string armyName = "";
     private List<MachineBridge.Machine> machines = [];
 
     private bool machinesAsked;
@@ -42,6 +45,12 @@ public partial class PlayPanel : UserControl
 
     private string? tunnelServer;
 
+    private bool codeShown;
+
+    private string? opponentName;
+
+    private readonly Play.InviteClock inviteClock = new();
+
     private bool playStarted;
     private bool playSpawned;
     private bool peerHere;
@@ -54,9 +63,7 @@ public partial class PlayPanel : UserControl
         driver.Output += line => Interpret(line.Trim());
 
         var me = System.Reflection.Assembly.GetExecutingAssembly();
-        var (testFor, testExpires) = TestBuild.Read(me);
-        var testMark = TestBuild.Mark(testFor, testExpires);
-        driver.Say($"Strikers {me.ManifestModule.ModuleVersionId:N} started" + (testMark is null ? "" : $" ({testMark})"));
+        driver.Say($"Strikers {me.ManifestModule.ModuleVersionId:N} started");
         driver.Trouble += (headline, detail) =>
         {
             driver.CancelStart();
@@ -67,6 +74,8 @@ public partial class PlayPanel : UserControl
             Find<Button>("StopButton").IsVisible = true;
         };
         driver.LobbyEnded += StartPlay;
+        driver.PlayEnded += PlayEnded;
+        Identity.Start();
 
         pages[Stage.Start] = Find<Control>("StartPage");
         pages[Stage.HostChoose] = Find<Control>("StartPage");
@@ -78,6 +87,7 @@ public partial class PlayPanel : UserControl
         pages[Stage.SetUp] = Find<Control>("SetUpPage");
         pages[Stage.Playing] = Find<Control>("PlayingPage");
 
+        BuildCodeCells();
         Dress();
         WireButtons();
         WirePickers();
@@ -108,6 +118,7 @@ public partial class PlayPanel : UserControl
             ? parsed
             : Stage.HostInvite;
 
+        captureFocus = true;
         var once = false;
         AttachedToVisualTree += (_, _) =>
         {
@@ -123,7 +134,7 @@ public partial class PlayPanel : UserControl
                 pages[Stage.Start].IsVisible = false;
                 Find<Button>("StopButton").IsVisible = true;
                 TellFocus(true);
-                StartWaiting(HostingHeadline(), "Reaching the relay.");
+                StartWaiting(HostingHeadline, "");
                 DispatcherTimer.RunOnce(() => ShowFocusDoorScreen(target), TimeSpan.FromMilliseconds(1500));
             }, TimeSpan.FromMilliseconds(600));
         };
@@ -140,10 +151,23 @@ public partial class PlayPanel : UserControl
                 break;
 
             case Stage.Safety:
-                fingerprint.Take("D5FC31D86A71485C");
-                ShowSafetyCode(fingerprint.Code, warning: false, flow.Hosting);
-                Go(Stage.Safety);
-                CheckTypedCode();
+                if (Environment.GetEnvironmentVariable("STRIKERS_NO_CODE") is null)
+                {
+                    fingerprint.Take("D5FC31D86A71485C");
+                }
+
+                if (Environment.GetEnvironmentVariable("STRIKERS_SHOW_CODE") is not null)
+                {
+                    codeShown = true;
+                    DrawEye();
+                }
+
+                OpenSafetyScreen();
+                if (Environment.GetEnvironmentVariable("STRIKERS_TYPE_CODE") is { } typed)
+                {
+                    Find<TextBox>("TypedCode").Text = typed;
+                }
+
                 break;
 
             case Stage.SetUp:
@@ -153,13 +177,18 @@ public partial class PlayPanel : UserControl
 
             case Stage.Playing:
                 Go(Stage.Playing);
+                if (Environment.GetEnvironmentVariable("STRIKERS_SHOW_STOP") is "report" or "finishing")
+                {
+                    ShowHaltForCapture();
+                }
+
                 break;
 
             default:
                 Find<TextBox>("ShareBox").Text = "bore.pub:12345 0123456789abcdef01234567 GATE01";
                 Find<Button>("CopyInviteButton").IsEnabled = true;
                 Go(Stage.HostInvite);
-                WaitForJoin();
+                InviteMade();
                 break;
         }
     }
@@ -179,20 +208,44 @@ public partial class PlayPanel : UserControl
         Announce(stage);
         EnterArmyScreen();
 
-        if (Environment.GetEnvironmentVariable("STRIKERS_SHOW_STOP") is not null)
+        if (Environment.GetEnvironmentVariable("STRIKERS_SHOW_STOP") is { } stop)
         {
             Find<Button>("StopButton").IsVisible = true;
             if (stage == Stage.SetUp)
             {
                 ShowClock(Play.SetupWindow);
             }
+
+            if (stop is "report" or "finishing")
+            {
+                ShowHaltForCapture();
+            }
         }
+    }
+
+    private void ShowHaltForCapture()
+    {
+        var halt = Play.HaltText(disagreement: true);
+        stopSaid = (halt.Headline, halt.Detail, true);
+        reportZip = System.IO.Path.Combine(AppContext.BaseDirectory, Report.Folder, Report.FileName(DateTime.Now));
+        var finishing = Environment.GetEnvironmentVariable("STRIKERS_SHOW_STOP") == "finishing";
+        reportPendingSince = finishing ? DateTime.UtcNow : null;
+        Ink("PlayStatus", Palette.SlateDark.Bad);
+        Find<TextBlock>("PlayStatus").Text = finishing ? Play.HaltStatusFinishing : Play.HaltStatus;
+        ShowStop();
     }
 
     private Stage? captureStage;
 
+    private bool captureFocus;
+
     private void PickBoardForCapture()
     {
+        if (int.TryParse(Environment.GetEnvironmentVariable("STRIKERS_ARMY_COST"), out var cost) && cost > 0)
+        {
+            Find<NumericUpDown>("DraftBox").Value = cost;
+        }
+
         var wanted = Environment.GetEnvironmentVariable("STRIKERS_PICK_BOARD");
         if (wanted is null || !int.TryParse(wanted, out var index))
         {
@@ -206,19 +259,6 @@ public partial class PlayPanel : UserControl
         }
     }
 
-    private string SaveReport()
-    {
-        var zip = Report.TrySave(AppContext.BaseDirectory, DateTime.Now, out var problem);
-        if (zip is not null)
-        {
-            driver.Say($"report saved: {Report.Folder}\\{System.IO.Path.GetFileName(zip)}");
-            return $"A report is in the {Report.Folder} folder beside Strikers. Please send it to the mod's creator.";
-        }
-
-        driver.Say($"report not saved: {problem}");
-        return $"The report could not be saved. Please send {MatchLog.Name} to the mod's creator instead.";
-    }
-
     private T Find<T>(string name) where T : Control
     {
         return this.FindControl<T>(name)!;
@@ -229,7 +269,7 @@ public partial class PlayPanel : UserControl
         var heading = new SolidColorBrush(Palette.SlateDark.Text.ToColor(), 0.88);
         foreach (var name in new[]
                  {
-                     "HostHeading", "JoinHeading", "ShareLabel", "SafetyLabel",
+                     "HostHeading", "JoinHeading", "ShareLabel", "ArmyHeading", "SafetyLabel",
                      "StepsHeading", "MatchHeading",
                  })
         {
@@ -239,7 +279,8 @@ public partial class PlayPanel : UserControl
         foreach (var name in new[]
                  {
                      "StepLine", "BoardLabel", "VictoryLabel", "DraftLabel",
-                     "ShareBox", "PasteBox", "TypedCode", "BoardBox",
+                     "YourCodeLabel", "TheirCodeLabel",
+                     "ShareBox", "PasteBox", "BoardBox",
                      "ArmyBox", "VictoryBox", "DraftBox",
                  })
         {
@@ -254,8 +295,6 @@ public partial class PlayPanel : UserControl
         {
             Find<Control>(name).SetValue(ForegroundProperty, Palette.SlateDark.Muted.ToBrush());
         }
-
-        Find<TextBlock>("SafetyCode").Foreground = Palette.SlateDark.Accent.ToBrush();
     }
 
     private void Ink(string name, Rgb colour)
@@ -277,12 +316,13 @@ public partial class PlayPanel : UserControl
         }
 
         ShowStageStrip();
-        Find<Button>("StopButton").IsVisible = driver.AnythingRunning;
+        Find<Button>("StopButton").IsVisible = driver.AnythingRunning || captureFocus;
         if (stage != Stage.ChooseArmy)
         {
             Find<Button>("UseArmyButton").IsVisible = false;
         }
 
+        Find<Button>("NewInviteButton").IsVisible = stage == Stage.HostInvite;
         Find<Button>("CodeMatchesButton").IsVisible = stage == Stage.Safety;
         Find<Button>("WriteButton").IsVisible = stage == Stage.SetUp;
 
@@ -381,7 +421,7 @@ public partial class PlayPanel : UserControl
 
             case Stage.Safety:
                 Say("Compare safety codes",
-                    "Read the four amber characters out to your opponent, then type the four they read to you.");
+                    "Press the eye to see your code, read it to your opponent, then type theirs.");
                 break;
 
             case Stage.SetUp:
@@ -401,6 +441,7 @@ public partial class PlayPanel : UserControl
     private void Say(string headline, string detail)
     {
         StopWaiting();
+        Find<Button>("ReportProblemButton").IsVisible = false;
         Ink("StepLine", Palette.SlateDark.Text);
         Show("StepLine", headline);
         Ink("DetailLine", Palette.SlateDark.Muted);
@@ -433,8 +474,7 @@ public partial class PlayPanel : UserControl
         if (picked is null)
         {
             ToastRail.Show(ToastKind.Bad,
-                           "That challenge is not available. The challenge list has not loaded. "
-                           + "If this keeps up, netplay could not be reached.");
+                           "The challenge list has not loaded yet. Try again in a moment.");
             return;
         }
 
@@ -444,9 +484,9 @@ public partial class PlayPanel : UserControl
 
     private void ChooseJoining()
     {
-        if (!HaveAnArmy())
+        if (ArmyStore.ReadAll().Count == 0)
         {
-            return;
+            ToastRail.Show(ToastKind.Info, Play.NoArmyToJoin);
         }
 
         StartJoining();
@@ -455,7 +495,6 @@ public partial class PlayPanel : UserControl
     private void BackToStart()
     {
         flow.Reset();
-        TellFocus(false);
         Find<TextBox>("ShareBox").Text = "";
         Find<TextBox>("PasteBox").Text = "";
         MaskInvite();
@@ -463,6 +502,7 @@ public partial class PlayPanel : UserControl
         Find<TextBlock>("SetUpClock").IsVisible = false;
         ShowStage(Stage.Start);
         Announce(Stage.Start);
+        TellFocus(false);
     }
 
     private void WireButtons()
@@ -470,7 +510,7 @@ public partial class PlayPanel : UserControl
         var joinHead = Find<Border>("JoinHead");
         joinHead.Margin = new Thickness(0, SectionGap - HeadingLead, 0, joinHead.Margin.Bottom);
 
-        Find<Button>("CreateLobbyButton").Click += (_, _) => ChooseHosting();
+        Find<Button>("CreateInviteButton").Click += (_, _) => ChooseHosting();
 
         Find<NumericUpDown>("DraftBox").PropertyChanged += (_, e) =>
         {
@@ -484,7 +524,7 @@ public partial class PlayPanel : UserControl
         {
             if (e.Property == BoundsProperty)
             {
-                FitCreateLobby();
+                FitCreateInvite();
             }
         };
 
@@ -506,6 +546,7 @@ public partial class PlayPanel : UserControl
         Find<Button>("UseArmyButton").Click += (_, _) => SendArmy();
         Find<Button>("WriteButton").Click += (_, _) => WriteSetup();
         Find<Button>("StopButton").Click += (_, _) => StopAll();
+        Find<Button>("ReportProblemButton").Click += (_, _) => SendReport();
         Find<Button>("CodeMatchesButton").Click += (_, _) => ConfirmCode();
         Find<ScrollViewer>("ArmyScroll").PropertyChanged += (_, e) =>
         {
@@ -513,6 +554,16 @@ public partial class PlayPanel : UserControl
             {
                 FitArmyTable();
             }
+        };
+
+        Find<Button>("NewInviteButton").Click += (_, _) => NewInvite();
+
+        Find<Button>("ShowCodeButton").Click += (_, _) =>
+        {
+            codeShown = !codeShown;
+            DrawEye();
+            DrawTypedCells();
+            ShowSafetyCode(fingerprint.Code, warning: false, flow.Hosting);
         };
 
         Find<Button>("CopyInviteButton").Click += async (_, _) =>
@@ -524,51 +575,184 @@ public partial class PlayPanel : UserControl
                 return;
             }
 
-            ToastRail.Show(ToastKind.Good, "Invite copied. Send it to your opponent.");
+            ToastRail.Show(ToastKind.Good, "Invite copied.");
         };
 
         Find<Button>("PasteButton").Click += async (_, _) => await PasteInvite();
 
-        Find<TextBox>("TypedCode").TextChanged += (_, _) =>
+        var typedBox = Find<TextBox>("TypedCode");
+        typedBox.TextChanged += (_, _) =>
         {
-            ForceUpper();
+            CleanTyped();
             CheckTypedCode();
         };
+        typedBox.GotFocus += (_, _) =>
+        {
+            KeepCaretAtEnd();
+            DrawTypedCells();
+        };
+        typedBox.LostFocus += (_, _) => DrawTypedCells();
+        typedBox.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == IsEnabledProperty)
+            {
+                DrawTypedCells();
+            }
+        };
+        typedBox.AddHandler(PointerReleasedEvent, (_, _) => KeepCaretAtEnd(), RoutingStrategies.Tunnel, handledEventsToo: true);
+        typedBox.AddHandler(KeyDownEvent, (_, e) =>
+        {
+            if (e.Key is Key.Left or Key.Right or Key.Home or Key.End or Key.Up or Key.Down)
+            {
+                e.Handled = true;
+            }
+        }, RoutingStrategies.Tunnel);
     }
 
-    private bool forcingUpper;
+    private bool cleaningTyped;
 
-    private void ForceUpper()
+    private void CleanTyped()
     {
-        if (forcingUpper)
+        if (cleaningTyped)
         {
             return;
         }
 
         var box = Find<TextBox>("TypedCode");
-        var upper = (box.Text ?? "").ToUpperInvariant();
-        if (upper == box.Text)
+        var clean = Play.SafetyTypedClean(box.Text);
+        if (clean != box.Text)
         {
-            return;
+            cleaningTyped = true;
+            box.Text = clean;
+            cleaningTyped = false;
         }
 
-        forcingUpper = true;
-        var caret = box.CaretIndex;
-        box.Text = upper;
-        box.CaretIndex = caret;
-        forcingUpper = false;
+        KeepCaretAtEnd();
+    }
+
+    private void KeepCaretAtEnd()
+    {
+        var box = Find<TextBox>("TypedCode");
+        var end = (box.Text ?? "").Length;
+        box.SelectionStart = end;
+        box.SelectionEnd = end;
+        box.CaretIndex = end;
     }
 
     private void CheckTypedCode()
     {
         var state = Play.SafetyTypedState(fingerprint.Code, Find<TextBox>("TypedCode").Text ?? "", flow.Hosting);
-        Find<Button>("CodeMatchesButton").IsEnabled = state.Continue;
-        SetContinueLabel(state.Press);
+        Find<Button>("CodeMatchesButton").IsEnabled = state.Continue && !confirmedByMe;
+        DrawTypedCells();
     }
 
-    private void SetContinueLabel(string label)
+    private readonly Border[] readOutCells = new Border[Play.SafetyTypedLength];
+    private readonly TextBlock[] readOutText = new TextBlock[Play.SafetyTypedLength];
+    private readonly Ellipse[] readOutDots = new Ellipse[Play.SafetyTypedLength];
+    private readonly Border[] typedCells = new Border[Play.SafetyTypedLength];
+    private readonly Ellipse[] typedDots = new Ellipse[Play.SafetyTypedLength];
+    private readonly Border[] typedCarets = new Border[Play.SafetyTypedLength];
+
+    private const char EyeOpen = (char)0xE890;
+    private const char EyeShut = (char)0xED1A;
+
+    private void BuildCodeCells()
     {
-        Find<TextBlock>("ContinueLabel").Text = label;
+        var readOutRow = Find<StackPanel>("ReadOutCells");
+        var typedRow = Find<StackPanel>("TypedCells");
+        for (var i = 0; i < Play.SafetyTypedLength; i++)
+        {
+            readOutText[i] = CodeCellText(Palette.SlateDark.Accent.ToBrush());
+            readOutDots[i] = CodeCellDot();
+            readOutCells[i] = new Border { Child = new Panel { Children = { readOutText[i], readOutDots[i] } } };
+            readOutCells[i].Classes.Add("codeCell");
+            readOutCells[i].Classes.Add("readOut");
+            readOutRow.Children.Add(readOutCells[i]);
+
+            typedDots[i] = CodeCellDot();
+            typedDots[i].Fill = Palette.SlateDark.Text.ToBrush();
+            typedDots[i].IsVisible = false;
+            typedCarets[i] = new Border { IsVisible = false };
+            typedCarets[i].Classes.Add("codeCaret");
+            typedCells[i] = new Border { Child = new Panel { Children = { typedDots[i], typedCarets[i] } } };
+            typedCells[i].Classes.Add("codeCell");
+            typedRow.Children.Add(typedCells[i]);
+        }
+
+        DrawEye();
+    }
+
+    private static Ellipse CodeCellDot()
+    {
+        return new Ellipse
+        {
+            Width = 8,
+            Height = 8,
+            Fill = Palette.SlateDark.Muted.ToBrush(),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
+
+    private void DrawEye()
+    {
+        Find<Button>("ShowCodeButton").Content = (codeShown ? EyeShut : EyeOpen).ToString();
+    }
+
+    private static TextBlock CodeCellText(IBrush ink)
+    {
+        return new TextBlock
+        {
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 22,
+            FontWeight = FontWeight.Bold,
+            Foreground = ink,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+    }
+
+    private void DrawTypedCells()
+    {
+        var box = Find<TextBox>("TypedCode");
+        var typed = box.Text ?? "";
+        var state = Play.SafetyTypedState(fingerprint.Code, typed, flow.Hosting);
+        var writing = box.IsFocused && box.IsEnabled && typed.Length < typedCells.Length;
+        for (var i = 0; i < typedCells.Length; i++)
+        {
+            var has = i < typed.Length;
+            typedDots[i].IsVisible = has;
+            var current = writing && i == typed.Length;
+            typedCarets[i].IsVisible = current;
+            typedCells[i].Classes.Set("current", current);
+            if (state.Complete)
+            {
+                typedCells[i].BorderBrush = (state.Good ? Palette.SlateDark.Good : Palette.SlateDark.Bad).ToBrush();
+            }
+            else
+            {
+                typedCells[i].ClearValue(Border.BorderBrushProperty);
+            }
+        }
+    }
+
+    private void OpenSafetyScreen()
+    {
+        var state = Play.SafetyScreenState(fingerprint.Code);
+        ShowSafetyCode(fingerprint.Code, state.Warning, flow.Hosting);
+        Go(Stage.Safety);
+
+        if (state.Warning)
+        {
+            SayBad(Play.NoCodeHeadline, state.Note);
+        }
+
+        CheckTypedCode();
+        if (!state.Warning)
+        {
+            Dispatcher.UIThread.Post(() => Find<TextBox>("TypedCode").Focus(), DispatcherPriority.Background);
+        }
     }
 
     private void WirePickers()
@@ -673,7 +857,8 @@ public partial class PlayPanel : UserControl
         if (chosen is null)
         {
             chosen = challenges.FirstOrDefault(c => c.Slots == 0);
-            budget = Play.StockRules(0).Draft;
+            var asked = Environment.GetEnvironmentVariable("STRIKERS_ARMY_COST");
+            budget = int.TryParse(asked, out var cost) && cost > 0 ? cost : Play.StockRules(0).Draft;
         }
 
         EnterArmyScreen();
@@ -774,7 +959,7 @@ public partial class PlayPanel : UserControl
         }
         if (!fits)
         {
-            FitCreateLobby();
+            FitCreateInvite();
             return;
         }
 
@@ -786,7 +971,7 @@ public partial class PlayPanel : UserControl
             holder.Height = side;
         }
 
-        FitCreateLobby();
+        FitCreateInvite();
 
         if (cell != previewCell)
         {
@@ -847,25 +1032,25 @@ public partial class PlayPanel : UserControl
         Find<TextBox>("PasteBox").PasswordChar = '*';
     }
 
-    private (List<int>? Board, string? Problem) ChosenBoard()
+    private (List<int>? Board, (int Width, int Height, int PlacementRows) Shape, string? Problem) ChosenBoard()
     {
-        hostShape = (StrikeBoard.Size, StrikeBoard.Size, -1);
+        var stock = (StrikeBoard.Size, StrikeBoard.Size, -1);
 
         var box = Find<ComboBox>("BoardBox");
         var (found, problem) = Play.PickedBoard(box.SelectedIndex, box.SelectedItem?.ToString(),
                                                 BoardStore.ReadAll());
         if (problem is not null)
         {
-            return (null, problem);
+            return (null, stock, problem);
         }
 
         if (found is null)
         {
-            return (null, null);
+            return (null, stock, null);
         }
 
-        hostShape = (found.Width, found.Height, found.PlacementRows);
-        return (Play.PlayableBoard(found.Cells, found.Width, found.Height), null);
+        var shape = (found.Width, found.Height, found.PlacementRows);
+        return (Play.PlayableBoard(found.Cells, found.Width, found.Height), shape, null);
     }
 
     private int ChosenVictoryPoints()
@@ -892,6 +1077,7 @@ public partial class PlayPanel : UserControl
             pick.ItemsSource = Array.Empty<string>();
             pick.IsVisible = false;
             Find<ScrollViewer>("ArmyScroll").IsVisible = false;
+            ShowArmyHead();
             Find<TextBlock>("ArmyCostLine").IsVisible = false;
             Find<Button>("UseArmyButton").IsVisible = false;
             Reflow();
@@ -901,6 +1087,7 @@ public partial class PlayPanel : UserControl
         pick.IsVisible = true;
         pick.IsEnabled = true;
         Find<ScrollViewer>("ArmyScroll").IsVisible = true;
+        ShowArmyHead();
         Find<Button>("UseArmyButton").IsVisible = true;
         Reflow();
 
@@ -911,8 +1098,7 @@ public partial class PlayPanel : UserControl
         }
 
         var offered = OffersOpponentArmy();
-        var hadOpponent = offered && pick.SelectedIndex == 0 && pick.ItemCount > 0
-                          && pick.SelectedItem?.ToString() == Play.OpponentArmyEntry;
+        var hadOpponent = offered && pick.SelectedIndex == 0 && pick.ItemCount > 0;
         var picked = pick.SelectedItem?.ToString();
         var names = new List<string>();
 
@@ -923,10 +1109,15 @@ public partial class PlayPanel : UserControl
 
         foreach (var a in ArmyStore.ReadAll())
         {
-            names.Add(a.Name);
+            names.Add(Play.ArmyLabel(a.Name));
         }
 
         pick.ItemsSource = names;
+        if (names.Count == 0)
+        {
+            Say("Choose your army", Play.WaitingForTheirArmyToBorrow);
+        }
+
         var first = offered ? 1 : 0;
         var back = hadOpponent ? 0 : picked is not null ? names.IndexOf(picked, first) : -1;
         pick.SelectedIndex = back >= 0 ? back : Math.Min(first, names.Count - 1);
@@ -948,11 +1139,15 @@ public partial class PlayPanel : UserControl
         if (OffersOpponentArmy() && pick.SelectedIndex == 0)
         {
             army = [.. opponentArmy];
+            armyName = Play.OpponentArmyEntry;
         }
         else
         {
-            var name = pick.SelectedItem?.ToString();
-            army = ArmyStore.ReadAll().FirstOrDefault(a => a.Name == name)?.Machines ?? [];
+            var saved = ArmyStore.ReadAll();
+            var index = pick.SelectedIndex - (OffersOpponentArmy() ? 1 : 0);
+            var inRange = index >= 0 && index < saved.Count;
+            army = inRange ? saved[index].Machines : [];
+            armyName = inRange ? saved[index].Name : "";
         }
 
         BuildArmyRows();
@@ -971,11 +1166,11 @@ public partial class PlayPanel : UserControl
 
     private static readonly (string Title, int Width)[] ArmyColumns =
     [
-        ("Machine", 0), ("Cost", 36), ("HP", 36), ("Move", 40), ("Range", 44), ("Power", 44),
-        ("Attack", 52), ("Ability", 82),
+        ("Machine", 0), ("Cost", 48), ("HP", 48), ("Move", 48), ("Range", 48), ("Power", 48),
+        ("Attack", 50), ("Ability", 82),
     ];
 
-    private const double ArmyTableMinWidth = 440;
+    private const double ArmyTableMinWidth = 500;
 
     private static readonly double ArmyStatsWidth = ArmyColumns.Where(c => c.Width > 0).Sum(c => c.Width);
     private const double ArmyPickerFloor = 120;
@@ -1097,7 +1292,7 @@ public partial class PlayPanel : UserControl
         var cell = new TextBlock
         {
             Text = text,
-            FontSize = bold || column != 0 ? 12 : 13,
+            FontSize = bold ? 12 : 13,
             FontWeight = bold ? FontWeight.SemiBold : FontWeight.Normal,
             FontFamily = bold || column is 0 or >= 6 ? FontFamily.Default : new FontFamily("Consolas"),
             Foreground = ink,
@@ -1174,6 +1369,7 @@ public partial class PlayPanel : UserControl
             }
 
             var row = new Border { Child = grid };
+            row.Classes.Add("armyRow");
             row.Classes.Add("row");
             if (m is not null)
             {
@@ -1200,13 +1396,12 @@ public partial class PlayPanel : UserControl
         var line = Find<TextBlock>("ArmyCostLine");
         line.Inlines!.Clear();
         line.IsVisible = true;
-        var ink = over ? Palette.SlateDark.Bad.ToBrush() : muted;
-        line.Inlines.Add(new Run("Army cost ") { Foreground = ink });
+        line.Inlines.Add(new Run("Army cost ") { Foreground = muted });
         line.Inlines.Add(new Run(cost.ToString())
         {
             Foreground = over ? Palette.SlateDark.Bad.ToBrush() : Palette.SlateDark.Good.ToBrush(),
         });
-        line.Inlines.Add(new Run(over ? $", over the {budget} allowed" : $" of {budget}") { Foreground = ink });
+        line.Inlines.Add(new Run($" of {budget}") { Foreground = muted });
         FitArmyPicker();
     }
 
@@ -1215,46 +1410,25 @@ public partial class PlayPanel : UserControl
         var grid = ArmyRowGrid();
         grid.Children.Add(ArmyCell("Ag", 0, Brushes.Transparent));
         var ghost = new Border { Child = grid, IsHitTestVisible = false };
+        ghost.Classes.Add("armyRow");
         ghost.Classes.Add("row");
         return ghost;
     }
 
     private void ShowSafetyCode(string code, bool warning, bool hosting)
     {
-        var block = Find<TextBlock>("SafetyCode");
-        block.Inlines!.Clear();
-        Find<TextBox>("TypedCode").PlaceholderText = Play.SafetyPlaceholder(hosting);
-
+        Find<Control>("SafetyHead").IsVisible = !warning;
+        Find<Control>("SafetyForm").IsVisible = !warning;
         if (warning)
         {
-            block.Inlines.Add(new Run(code) { Foreground = Palette.SlateDark.Bad.ToBrush() });
             return;
         }
 
-        var groups = Play.SafetyGroups(code);
-        var typed = Play.SafetyTypedGroup(hosting, groups.Count);
-        var readOut = Play.SafetyReadOutGroup(hosting, groups.Count);
-        for (var i = 0; i < groups.Count; i++)
+        var cells = Play.SafetyReadOutCells(code, hosting, codeShown);
+        for (var i = 0; i < readOutCells.Length; i++)
         {
-            if (i == typed)
-            {
-                block.Inlines.Add(new Run(new string('*', groups[i].Length))
-                {
-                    Foreground = Palette.SlateDark.Muted.ToBrush(),
-                });
-            }
-            else
-            {
-                block.Inlines.Add(new Run(groups[i])
-                {
-                    Foreground = i == readOut ? Palette.SlateDark.Accent.ToBrush() : Palette.SlateDark.Text.ToBrush(),
-                });
-            }
-
-            if (i < groups.Count - 1)
-            {
-                block.Inlines.Add(new Run(" "));
-            }
+            readOutText[i].Text = cells[i];
+            readOutDots[i].IsVisible = cells[i].Length == 0;
         }
     }
 
@@ -1296,7 +1470,7 @@ public partial class PlayPanel : UserControl
             var words = new TextBlock
             {
                 Text = steps[i],
-                FontSize = 12,
+                FontSize = 13,
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = Palette.SlateDark.Text.ToBrush(),
             };
@@ -1316,7 +1490,7 @@ public partial class PlayPanel : UserControl
 
     private const double HeadingLead = 6;
 
-    private void FitCreateLobby()
+    private void FitCreateInvite()
     {
         var holder = Find<Border>("BoardThumbHolder");
         var preview = holder.IsVisible && !double.IsNaN(holder.Width) ? holder.Width : 0;
@@ -1328,7 +1502,7 @@ public partial class PlayPanel : UserControl
         {
             var oneLine = row.Bounds.Width >= firstBox.Bounds.Left + FirstBoxNeed + PreviewGap + want;
             var rule = Find<Border>("FirstRule");
-            var placed = Find<Button>("CreateLobbyButton");
+            var placed = Find<Button>("CreateInviteButton");
             if (oneLine != (Grid.GetRow(placed) == 0))
             {
                 Grid.SetRow(placed, oneLine ? 0 : 1);
@@ -1346,7 +1520,7 @@ public partial class PlayPanel : UserControl
             }
         }
 
-        var button = Find<Button>("CreateLobbyButton");
+        var button = Find<Button>("CreateInviteButton");
         if (double.IsNaN(button.Width) || Math.Abs(button.Width - want) > 0.5)
         {
             button.Width = want;
@@ -1360,8 +1534,49 @@ public partial class PlayPanel : UserControl
             if (e.Property == BoundsProperty)
             {
                 FitStart();
+                FitArmy();
             }
         };
+
+        Find<ScrollViewer>("StageScroll").PropertyChanged += (_, e) =>
+        {
+            if (e.Property == ScrollViewer.ExtentProperty || e.Property == ScrollViewer.ViewportProperty)
+            {
+                FitArmy();
+            }
+        };
+    }
+
+    private double armyFullNeed;
+
+    private void FitArmy()
+    {
+        var page = Find<StackPanel>("ChooseArmyPage");
+        var viewport = Find<ScrollViewer>("StageScroll").Bounds.Height;
+        if (viewport < 1 || !page.IsVisible)
+        {
+            return;
+        }
+
+        var isCompact = page.Classes.Contains("compact");
+        if (!isCompact)
+        {
+            armyFullNeed = page.DesiredSize.Height;
+        }
+
+        var wantCompact = viewport + 0.5 < armyFullNeed;
+        if (wantCompact != isCompact)
+        {
+            page.Classes.Set("compact", wantCompact);
+            ShowArmyHead();
+        }
+    }
+
+    private void ShowArmyHead()
+    {
+        var page = Find<StackPanel>("ChooseArmyPage");
+        Find<Control>("ArmyHead").IsVisible = Find<ScrollViewer>("ArmyScroll").IsVisible
+                                              && !page.Classes.Contains("compact");
     }
 
     private double lastHeadCost = 40;
@@ -1411,6 +1626,8 @@ public partial class PlayPanel : UserControl
     }
 
     private const string NotAnInvite = "That is not an invite. Paste the whole line your opponent sent.";
+
+    private const string NotOurInvite = "Strikers cannot join that invite. Ask your opponent to send a new one.";
 
     private async Task PasteInvite()
     {

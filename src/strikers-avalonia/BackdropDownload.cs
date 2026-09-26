@@ -51,7 +51,7 @@ internal static class BackdropDownload
             };
             using var http = new HttpClient(handler);
             http.Timeout = TimeSpan.FromMinutes(10);
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("Strikers/1.0");
+            http.DefaultRequestHeaders.UserAgent.ParseAdd($"Strikers/{UpdateCheck.Ours() ?? "0"}");
 
             using var response = await http.GetAsync(picture.Url,
                                                      HttpCompletionOption.ResponseHeadersRead, cancel);

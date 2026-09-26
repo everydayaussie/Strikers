@@ -1,0 +1,15 @@
+name: Problem
+description: A match stopped, the game closed, or something else went wrong.
+body:
+  - type: textarea
+    id: report
+    attributes:
+      label: Report
+      description: Drag the selected report zip here. Anything you drop or write on this page is public.
+    validations:
+      required: true
+  - type: textarea
+    id: last
+    attributes:
+      label: What happened just before
+      description: The last move, and anything odd on either screen.

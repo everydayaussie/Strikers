@@ -1,1 +1,1 @@
-Online multiplayer mod for Machine Strike inside Horizon Forbidden West, by replacing the AI's move with another player's inputs
+Play Machine Strike online against a friend, each in your own copy of Horizon Forbidden West. The computer opponent in your game plays your friend's moves.

@@ -34,7 +34,7 @@
           <Border Classes="optionDivider" />
           <Button Name="ClearArmyButton" Classes="glass" VerticalAlignment="Center" />
           <Border Classes="optionDivider" />
-          <TextBox Name="ImportArmyBox" FontSize="13" PlaceholderText="Paste army"
+          <TextBox Name="ImportArmyBox" FontSize="13" PlaceholderText="Army code"
                    MaxLength="64" VerticalAlignment="Center">
             <TextBox.InnerRightContent>
               <Button Name="ImportArmyButton" Classes="inlineAction" Content="Import" />

@@ -718,11 +718,20 @@ internal static partial class Program
         return [.. code];
     }
 
+    private const byte MoveTableSlots = 64;
+
     internal static byte[] MoveBoundsStub8(ulong stubAt, int width)
     {
         var pad = 8 - width;
         var code = new List<byte>();
-        code.AddRange(MoveBoundsSite8Original);
+        code.AddRange(MoveBoundsSite8Original[..7]);
+        code.AddRange([0x83, 0xF9, MoveTableSlots]);
+        var capAt = code.Count + 2;
+        var cap = new List<byte> { 0xC7, 0x82, 0xB0, 0x00, 0x00, 0x00, MoveTableSlots - 1, 0x00, 0x00, 0x00, 0xE9 };
+        cap.AddRange(Rel32(stubAt + (ulong)(capAt + 10), _base + MoveBoundsSite8Back, 5));
+        code.AddRange([0x72, (byte)cap.Count]);
+        code.AddRange(cap);
+        code.AddRange(MoveBoundsSite8Original[7..]);
         if (pad > 0)
         {
             code.AddRange([0x41, 0x89, 0xCA]);
@@ -1417,6 +1426,7 @@ internal static partial class Program
         ulong srcUnit = 0, dstUnit = 0, walkUnit = 0;
         var srcSeat = "?";
         var dstSeat = "?";
+        var standing = new HashSet<(int X, int Y)>();
 
         var (walkX, walkY) = StandSquare(a);
 
@@ -1434,6 +1444,7 @@ internal static partial class Program
             int x = Nibble(packed), y = Nibble(packed >> 4);
             var owner = ReadPtr(u);
             var who = owner == ours ? "AI" : owner == theirs ? "opponent" : "?";
+            standing.Add((x, y));
 
             if (x == srcX && y == srcY)
             {
@@ -1488,24 +1499,26 @@ internal static partial class Program
                 problems.Add($"attack target ({dstX},{dstY}) is the AI's own piece");
             }
 
-            if (a.FromX >= 0 && a.FromY >= 0)
+            var pattern = srcUnit != 0 ? PatternOf(srcUnit) : -1;
+            var (skill, srcRange) = srcUnit != 0 ? SkillAndRange(srcUnit) : (-1, -1);
+            var fromGiven = a.FromX >= 0 && a.FromY >= 0;
+
+            if (fromGiven || pattern == DashPattern)
             {
-                var aligned = (facing & 3) switch
+                var reach = ReachProblem(pattern, skill, srcRange, walkX, walkY, facing, dstX, dstY);
+                if (reach is not null)
                 {
-                    0 => dstX == walkX && dstY < walkY,
-                    1 => dstY == walkY && dstX > walkX,
-                    2 => dstX == walkX && dstY > walkY,
-                    _ => dstY == walkY && dstX < walkX,
-                };
+                    problems.Add(reach);
+                }
+            }
 
-                var (skill, srcRange) = srcUnit != 0 ? SkillAndRange(srcUnit) : (-1, -1);
-                var swept = skill == SpreadSkill
-                            && InSpreadReach(walkX, walkY, facing, srcRange, dstX, dstY);
-
-                if (!aligned && !swept)
+            if (ChargeLanding(pattern, srcRange, walkX, walkY, facing) is { } land)
+            {
+                var landProblem = LandingProblem(land, width, height,
+                                                 standing.Contains(land) && land != (srcX, srcY));
+                if (landProblem is not null)
                 {
-                    problems.Add($"standing on ({walkX},{walkY}) facing {facing} does not put the victim " +
-                                 $"({dstX},{dstY}) on the strike line, the attack would hit something else");
+                    problems.Add(landProblem);
                 }
             }
 

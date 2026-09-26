@@ -1,12 +1,9 @@
 namespace Strikers.Netplay;
 
-internal sealed class Lobby(string localBuild, bool isHost, string localNetplay = "", string localProbe = "",
-                            DateOnly? localExpires = null, DateOnly? localDay = null)
+internal sealed class Lobby(string localBuild, bool isHost, string localNetplay = "", string localProbe = "")
 {
     public string LocalBuild { get; } = localBuild;
 
-    public DateOnly? LocalExpires { get; } = localExpires;
-    public DateOnly LocalDay { get; } = localDay ?? DateOnly.FromDateTime(DateTime.Now);
     public string? PeerBuild { get; private set; }
     public bool IsHost { get; } = isHost;
     public int Seat { get; set; } = -1;
@@ -134,7 +131,6 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
             Build = LocalBuild,
             NetplayVersion = LocalNetplay.Length > 0 ? LocalNetplay : null,
             ProbeVersion = LocalProbe.Length > 0 ? LocalProbe : null,
-            Day = LocalDay.ToString("yyyy-MM-dd"),
         };
     }
 
@@ -176,11 +172,6 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
             return Refusal;
         }
 
-        if (LocalExpires is { } expires && TestBuild.DayPast(expires, FrameLimits.Safe(f.Day, 10)))
-        {
-            Refusal = TestBuild.ExpiredMessage();
-        }
-
         return Refusal;
     }
 
@@ -218,8 +209,14 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
 
     private void Told(string? challenge)
     {
-        if (IsHost || string.IsNullOrEmpty(challenge))
+        if (IsHost)
         {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(challenge))
+        {
+            Challenge = null;
             return;
         }
 
@@ -417,10 +414,15 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
             BoardHeight = height;
             PlacementRows = f.PlacementRows;
         }
-        else if (f.PlacementRows != Preset.RuleNotSet)
+        else
         {
-            if (Preset.DepthProblem(f.PlacementRows, BoardHeight,
-                                    "the placing depth the other player sent") is { } depthBad)
+            Board = null;
+            BoardWidth = Preset.BoardSide;
+            BoardHeight = Preset.BoardSide;
+
+            if (f.PlacementRows != Preset.RuleNotSet
+                && Preset.DepthProblem(f.PlacementRows, BoardHeight,
+                                       "the placing depth the other player sent") is { } depthBad)
             {
                 Refusal ??= depthBad;
                 return;
@@ -490,10 +492,7 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
         ToldBoard(f);
         ToldFirst(f);
 
-        if (f.Name is not null)
-        {
-            PeerName = Names.FromPeer(f.Name);
-        }
+        PeerName = Names.FromPeer(f.Name);
 
         var army = new List<string>();
         foreach (var m in f.Army ?? [])
@@ -542,6 +541,11 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
             }
         }
 
+        if (placements.Select(p => (p.X, p.Y)).Distinct().Count() != placements.Count)
+        {
+            Refusal ??= "the other player sent two machines for one starting square";
+        }
+
         if (placements.Count > 0 && placements.Count != army.Count)
         {
             Refusal ??= $"the other player sent {placements.Count} placements for an army of " +
@@ -571,6 +575,90 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
         Remote = null;
         RemoteReady = false;
         _acceptedSetup = null;
+        lock (_confirmGate)
+        {
+            _peerConfirmedOn = 0;
+            _peerSetup = null;
+        }
+    }
+
+    public sealed record Written(List<int>? Board, int? VictoryPoints, int? DraftPoints, int? PlacementRows);
+
+    public Written ToWrite(Preset? preset)
+    {
+        var fallback = IsHost ? preset : null;
+        var board = Board ?? (fallback is { Board.Count: > 0 } chosen ? chosen.Board : null);
+        var victory = VictoryPoints != Preset.RuleNotSet ? VictoryPoints : fallback?.VictoryPoints;
+        var draft = DraftPoints != Preset.RuleNotSet ? DraftPoints : fallback?.DraftPoints;
+        var depth = PlacementRows != Preset.RuleNotSet ? PlacementRows : (int?)null;
+        return new Written(board, victory, draft, depth);
+    }
+
+    public const string SetupsDiffer =
+        "the two PCs hold different setups (the armies, the board or the rules), so the match cannot start";
+
+    private const string SetupDigestLabel = "Strikers-setup-v1\0";
+
+    public string SetupDigest(Preset? preset = null)
+    {
+        var written = ToWrite(preset);
+        var remote = Remote;
+        var width = BoardWidth;
+        var height = BoardHeight;
+        var ours = Local.Placements.Select(p => new[] { p.X, p.Y, p.Dir & 3 }).ToList();
+        var theirs = (remote?.Placements ?? [])
+            .Select(p => p.Rotated(width, height))
+            .Select(p => new[] { p.X, p.Y, p.Dir & 3 })
+            .ToList();
+        var theirArmy = remote?.Army ?? [];
+
+        var content = new WrittenSetup
+        {
+            Challenge = Challenge,
+            Board = written.Board,
+            BoardWidth = width,
+            BoardHeight = height,
+            PlacementRows = written.PlacementRows,
+            VictoryPoints = written.VictoryPoints,
+            DraftPoints = written.DraftPoints,
+            First = First,
+            HostArmy = IsHost ? Local.Army : theirArmy,
+            HostPlacements = IsHost ? ours : theirs,
+            JoinerArmy = IsHost ? theirArmy : Local.Army,
+            JoinerPlacements = IsHost ? theirs : ours,
+            HostName = IsHost ? LocalName : PeerName,
+            JoinerName = IsHost ? PeerName : LocalName,
+        };
+
+        var json = System.Text.Json.JsonSerializer.Serialize(content, WireJson.Default.WrittenSetup);
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(SetupDigestLabel + json));
+        return Convert.ToHexStringLower(hash);
+    }
+
+    public Lobby Frozen()
+    {
+        var copy = new Lobby(LocalBuild, IsHost, LocalNetplay, LocalProbe)
+        {
+            Seat = Seat,
+        };
+
+        var remote = Remote;
+        copy.Challenge = Challenge;
+        copy.Board = Board is { } board ? [.. board] : null;
+        copy.BoardWidth = BoardWidth;
+        copy.BoardHeight = BoardHeight;
+        copy.PlacementRows = PlacementRows;
+        copy.VictoryPoints = VictoryPoints;
+        copy.DraftPoints = DraftPoints;
+        copy.First = First;
+        copy.LocalName = LocalName;
+        copy.PeerName = PeerName;
+        copy.Local.Army = [.. Local.Army];
+        copy.Local.Placements = [.. Local.Placements];
+        copy.Remote = remote is null
+            ? null
+            : new SeatSetup { Army = [.. remote.Army], Placements = [.. remote.Placements] };
+        return copy;
     }
 
     public void OnReady(Frame _)
@@ -580,7 +668,10 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
 
     private readonly object _confirmGate = new();
     private int _localConfirmedOn;
+    private string? _localCode;
     private int _peerConfirmedOn;
+    private string? _peerSetup;
+    private int _boundOn;
 
     public static string? ConfirmProblem(string? typed, string? fingerprint)
     {
@@ -597,30 +688,79 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
 
         return string.Equals(said, fingerprint, StringComparison.OrdinalIgnoreCase)
             ? null
-            : "the safety code changed since it was compared";
+            : CodeMoved;
     }
 
-    public void ConfirmedLocally(int channel)
+    public const string CodeMoved = "the safety code changed since it was compared";
+
+    public const string WriteUnconfirmed = "nothing was written: both players must confirm the same safety code first";
+
+    public void ConfirmedLocally(int channel, string code)
     {
         lock (_confirmGate)
         {
             _localConfirmedOn = channel;
+            _localCode = code;
         }
     }
 
-    public void ConfirmedByPeer(int channel)
+    public static bool SetupAgrees(string? confirmed, string current)
     {
+        return confirmed is not null && string.Equals(confirmed, current, StringComparison.Ordinal);
+    }
+
+    public bool ConfirmedByPeer(int channel, string? theirSetup, string ourSetup)
+    {
+        if (!SetupAgrees(theirSetup, ourSetup))
+        {
+            return false;
+        }
+
         lock (_confirmGate)
         {
             _peerConfirmedOn = channel;
+            _peerSetup = theirSetup;
+        }
+
+        return true;
+    }
+
+    public string? ConfirmedSetup
+    {
+        get
+        {
+            lock (_confirmGate)
+            {
+                return _peerSetup;
+            }
         }
     }
 
-    public int? BindingChannel(int current)
+    public int? BindingChannel(string? code, int current)
     {
         lock (_confirmGate)
         {
-            return BindingDue(_localConfirmedOn, _peerConfirmedOn, current) ? current : null;
+            var named = string.Equals(code, _localCode, StringComparison.Ordinal);
+            return BindingDue(_localConfirmedOn, _peerConfirmedOn, current) && named ? current : null;
+        }
+    }
+
+    public void BoundOn(int channel)
+    {
+        lock (_confirmGate)
+        {
+            _boundOn = channel;
+        }
+    }
+
+    public string? BoundSetup
+    {
+        get
+        {
+            lock (_confirmGate)
+            {
+                return BindingDue(_localConfirmedOn, _peerConfirmedOn, _boundOn) ? _peerSetup : null;
+            }
         }
     }
 
@@ -703,6 +843,12 @@ internal sealed class Lobby(string localBuild, bool isHost, string localNetplay 
             return "waiting for the other player to be ready";
         }
 
-        return "both ready, stand in the Machine Strike menu and run: write";
+        if (BoundSetup is null)
+        {
+            return "both ready, compare the safety code (the fingerprint line) with the other player, " +
+                   "run: confirm <code>, then stand in the Machine Strike menu and run: write";
+        }
+
+        return "both confirmed, stand in the Machine Strike menu and run: write";
     }
 }

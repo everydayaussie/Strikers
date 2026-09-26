@@ -26,6 +26,34 @@ internal static partial class Program
 
     internal const string MatchLeftReason = "a player left the match before it ended, so it cannot go on";
 
+    internal const string GameClosedReason = "the game on this PC closed before the match ended, so it cannot go on";
+
+    internal const int GameGoneChecks = 60;
+
+    internal static readonly TimeSpan GameGoneCheckDelay = TimeSpan.FromMilliseconds(250);
+
+    internal static string LeftOrClosedReason(bool gameStillRunning)
+    {
+        return gameStillRunning ? MatchLeftReason : GameClosedReason;
+    }
+
+    private static bool GameRunning()
+    {
+        try
+        {
+            return System.Diagnostics.Process.GetProcessesByName(AfterHalt.GameProcess).Length > 0;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+
+    internal static string StartFailedLine(string what, Exception e)
+    {
+        return $"  could not start {what} ({e.GetType().Name})";
+    }
+
     internal static bool IsNoMatchLine(string line)
     {
         return line.Trim() == "{\"nomatch\":true}";
@@ -35,6 +63,7 @@ internal static partial class Program
     {
         return auto && sawBoard && !halted && !summarised;
     }
+
     private static readonly List<string> _watched = [];
 
     private static bool _auto;
@@ -360,6 +389,7 @@ internal static partial class Program
     private static readonly List<int> _placedSlots = [];
 
     private static readonly HashSet<int> _writtenSlots = [];
+    private static readonly HashSet<(int X, int Y)> _writtenSquares = [];
     private static int _releasedPlacements;
 
     private static readonly Queue<Frame> _heldPlacements = new();
@@ -382,6 +412,12 @@ internal static partial class Program
         {
             if (!PlacementWaits(_auto, _autoOffByUser, _heldPlacements.Count))
             {
+                if (FrameGate.Refuse(CurrentPhase(), f, _writtenSlots, _writtenSquares) is { } written)
+                {
+                    peer.HaltAndTell($"the other side sent {written}");
+                    return;
+                }
+
                 WritePlacement(peer, probe, f);
                 return;
             }
@@ -408,19 +444,25 @@ internal static partial class Program
 
     private static void ReleaseHeldPlacements(Peer peer, string probe)
     {
+        ReleaseHeldPlacements(peer, () => LocalShape(probe), probeArgs => RunProbeQuiet(probe, probeArgs));
+    }
+
+    private static void ReleaseHeldPlacements(Peer peer, Func<(int Width, int Height)?> shape,
+                                               Func<string[], int> placeOne)
+    {
         lock (_placementLock)
         {
             while (_heldPlacements.Count > 0 && !peer.Halted)
             {
                 var f = _heldPlacements.Dequeue();
 
-                if (FrameGate.Refuse(CurrentPhase(), f, _writtenSlots) is { } wrongPhase)
+                if (FrameGate.Refuse(CurrentPhase(), f, _writtenSlots, _writtenSquares) is { } wrongPhase)
                 {
                     peer.HaltAndTell($"the other side sent {wrongPhase}");
                     return;
                 }
 
-                WritePlacement(peer, probe, f);
+                WritePlacement(peer, f, shape, placeOne);
             }
         }
     }
@@ -430,6 +472,7 @@ internal static partial class Program
         lock (_placementLock)
         {
             _writtenSlots.Clear();
+            _writtenSquares.Clear();
             _releasedPlacements = 0;
             _heldPlacements.Clear();
         }
@@ -439,18 +482,24 @@ internal static partial class Program
     {
         lock (_placementLock)
         {
-            return FrameGate.Refuse(CurrentPhase(), f, _writtenSlots);
+            return FrameGate.Refuse(CurrentPhase(), f, _writtenSlots, _writtenSquares);
         }
     }
 
     private static void WritePlacement(Peer peer, string probe, Frame f)
+    {
+        WritePlacement(peer, f, () => LocalShape(probe), probeArgs => RunProbeQuiet(probe, probeArgs));
+    }
+
+    private static void WritePlacement(Peer peer, Frame f, Func<(int Width, int Height)?> shape,
+                                        Func<string[], int> placeOne)
     {
         if (f.Place is not { } theirs)
         {
             return;
         }
 
-        if (LocalShape(probe) is not { } placeShape)
+        if (shape() is not { } placeShape)
         {
             peer.HaltAndTell("the local board could not be read, so the other player's " +
                              "placement cannot be rotated into this PC's frame");
@@ -468,9 +517,9 @@ internal static partial class Program
                           $"ours at ({mine.X},{mine.Y}) facing {mine.Dir}");
 
         var record = TurnBoundary.PlacementRecordFor(_releasedPlacements);
-        if (RunProbeQuiet(probe, ["--place-one", record.ToString(), mine.X.ToString(),
-                                  mine.Y.ToString(), mine.Dir.ToString(), "--for-slot",
-                                  f.PlaceIdx.ToString(), "--player", "1", "--yes"]) != 0)
+        if (placeOne(["--place-one", record.ToString(), mine.X.ToString(),
+                      mine.Y.ToString(), mine.Dir.ToString(), "--for-slot",
+                      f.PlaceIdx.ToString(), "--player", "1", "--yes"]) != 0)
         {
             peer.HaltAndTell(
                 $"could not write their placement of machine {f.PlaceIdx} at ({mine.X},{mine.Y}). " +
@@ -479,9 +528,15 @@ internal static partial class Program
             return;
         }
 
-        _writtenSlots.Add(f.PlaceIdx);
-        _releasedPlacements++;
+        RecordWrittenPlacement(f, theirs);
         AllowAiPlacement(_releasedPlacements, f.PlaceIdx);
+    }
+
+    private static void RecordWrittenPlacement(Frame f, Placement theirs)
+    {
+        _writtenSlots.Add(f.PlaceIdx);
+        _writtenSquares.Add((theirs.X, theirs.Y));
+        _releasedPlacements++;
     }
 
     private static SessionPhase CurrentPhase()
@@ -518,6 +573,8 @@ internal static partial class Program
 
     private static List<string>? _playArmy;
 
+    private static string? _playArmyName;
+
     private static List<string> LocalArmy(int seat)
     {
         if (_playArmy is { Count: > 0 })
@@ -543,6 +600,219 @@ internal static partial class Program
     private static string? _capturePath;
     private static readonly object _captureLock = new();
 
+    private static Peer? _livePeer;
+
+    internal const string TheirRecordingWhat = "the other player's recording of the match";
+    internal const string TheirStartWhat = "the start of the other player's recording";
+    internal const string TheirLogWhat = "the other player's log";
+
+    internal const string OurRecordingWhat = "this PC's recording of the match";
+    internal const string OurStartWhat = "the start of this PC's recording";
+    internal const string OurLogWhat = "this PC's log";
+
+    private static IncomingFile _theirRecording = NewTailFile();
+    private static IncomingFile _theirStart = NewStartFile();
+    private static IncomingFile _theirLog = NewLogFile();
+
+    private static int _oursSent;
+
+    private static DateTime? _fileStamp;
+
+    internal static IncomingFile NewTailFile()
+    {
+        return new IncomingFile(TheirRecordingWhat, FrameLimits.MaxRecordingTailParts,
+                                FrameLimits.MaxRecordingTailBytes);
+    }
+
+    internal static IncomingFile NewStartFile()
+    {
+        return new IncomingFile(TheirStartWhat, FrameLimits.MaxRecordingStartParts,
+                                FrameLimits.MaxRecordingStartBytes);
+    }
+
+    internal static IncomingFile NewLogFile()
+    {
+        return new IncomingFile(TheirLogWhat, FrameLimits.MaxLogParts, FrameLimits.MaxLogBytes);
+    }
+
+    internal static DateTime? StampTaken()
+    {
+        return _fileStamp;
+    }
+
+    internal static DateTime FileStamp()
+    {
+        _fileStamp ??= DateTime.Now;
+        return _fileStamp.Value;
+    }
+
+    internal static string? NameForKind(MsgKind kind, string? ourCapture)
+    {
+        switch (kind)
+        {
+            case MsgKind.RecordingStart:
+                return Recordings.StartNameFor(ourCapture, FileStamp());
+
+            case MsgKind.Log:
+                return Recordings.LogNameFor(ourCapture, FileStamp());
+
+            case MsgKind.Recording:
+                return Recordings.NameFor(ourCapture, FileStamp());
+
+            default:
+                return null;
+        }
+    }
+
+    internal static void ForgetRecordings()
+    {
+        _theirRecording = NewTailFile();
+        _theirStart = NewStartFile();
+        _theirLog = NewLogFile();
+        _fileStamp = null;
+        Interlocked.Exchange(ref _oursSent, 0);
+    }
+
+    internal static void SendOurFiles(Peer? peer)
+    {
+        if (peer is null || Interlocked.Exchange(ref _oursSent, 1) == 1)
+        {
+            return;
+        }
+
+        string? path;
+        lock (_captureLock)
+        {
+            path = _capturePath;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(HaltSettle);
+
+            var head = path is null ? null : Recordings.Head(path, FrameLimits.MaxRecordingStartBytes);
+            await SendOneFile(peer, head, MsgKind.RecordingStart, FrameLimits.MaxRecordingStartParts, OurStartWhat);
+
+            var tail = path is null ? null : Recordings.Tail(path, FrameLimits.MaxRecordingTailBytes);
+            await SendOneFile(peer, tail, MsgKind.Recording, FrameLimits.MaxRecordingTailParts, OurRecordingWhat);
+
+            var log = Recordings.LogTail();
+            await SendOneFile(peer, log, MsgKind.Log, FrameLimits.MaxLogParts, OurLogWhat);
+        });
+    }
+
+    private static async Task SendOneFile(Peer peer, byte[]? bytes, MsgKind kind, int maxParts, string what)
+    {
+        if (bytes is not { Length: > 0 })
+        {
+            return;
+        }
+
+        var parts = Recordings.Parts(bytes, kind, maxParts);
+        if (parts.Count == 0)
+        {
+            return;
+        }
+
+        var sent = 0;
+        foreach (var part in parts)
+        {
+            if (peer.TrySend(part))
+            {
+                sent++;
+            }
+
+            await Task.Delay(RecordingPace);
+        }
+
+        Console.WriteLine(WentOut(what, sent, parts.Count));
+    }
+
+    internal static string WentOut(string what, int sent, int parts)
+    {
+        if (sent == parts)
+        {
+            return $"  -> {what} went out, {parts} part(s)";
+        }
+
+        return $"  -> {what} went out in part, {sent} of {parts} part(s)";
+    }
+
+    internal static void SayIfTheirsNeverCame()
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(Peer.HaltDrain + TimeSpan.FromSeconds(1));
+            foreach (var file in new[] { _theirStart, _theirRecording, _theirLog })
+            {
+                if (file.Unfinished() is { } unfinished)
+                {
+                    Console.WriteLine($"  {unfinished}");
+                }
+            }
+        });
+    }
+
+    internal static readonly TimeSpan RecordingPace = TimeSpan.FromMilliseconds(350);
+
+    internal static readonly TimeSpan HaltSettle = TimeSpan.FromSeconds(2);
+
+    internal static void TakeFile(Peer peer, Frame f)
+    {
+        if (!peer.Halted)
+        {
+            peer.HaltAndTell("the other side sent a recording while the match was live");
+            return;
+        }
+
+        string? ours;
+        lock (_captureLock)
+        {
+            ours = _capturePath;
+        }
+
+        IncomingFile into;
+        switch (f.Kind)
+        {
+            case MsgKind.RecordingStart:
+                into = _theirStart;
+                break;
+
+            case MsgKind.Log:
+                into = _theirLog;
+                break;
+
+            case MsgKind.Recording:
+                into = _theirRecording;
+                break;
+
+            default:
+                return;
+        }
+
+        if (NameForKind(f.Kind, ours) is not { } name)
+        {
+            return;
+        }
+
+        var problem = into.Offer(f, peer.Halted);
+        if (problem is not null)
+        {
+            Console.Error.WriteLine($"  {problem}");
+            return;
+        }
+
+        if (!into.Done || into.Taken is not { } bytes)
+        {
+            return;
+        }
+
+        var written = Recordings.Write(bytes, name);
+        Console.WriteLine(written is null
+            ? $"  {into.What} could not be written"
+            : $"  <- {into.What} is in {Captures.Folder}, {Path.GetFileName(written)}");
+    }
+
     private static void Capture(string json)
     {
         if (_capturePath is null)
@@ -550,28 +820,64 @@ internal static partial class Program
             return;
         }
 
-        try { lock (_captureLock)
+        try
+        {
+            lock (_captureLock)
             {
                 File.AppendAllText(_capturePath, json + Environment.NewLine);
             }
         }
-        catch (Exception e) { Console.Error.WriteLine($"  auto: capture stopped: {e.Message}"); _capturePath = null; }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"  auto: capture stopped ({e.GetType().Name})");
+            _capturePath = null;
+        }
+    }
+
+    internal static bool CapturesSample(bool auto, bool tracking, bool halted)
+    {
+        return tracking && (auto || halted);
+    }
+
+    internal static bool SampleGoesToAuto(bool auto, bool tracking, bool halted)
+    {
+        return auto || CapturesSample(auto, tracking, halted);
+    }
+
+    internal static bool ReadsSample(bool auto, bool tracking, bool halted)
+    {
+        return auto && tracking && !halted;
     }
 
     private static void OnAutoSample(Peer peer, string json)
     {
-        if (!_auto || _tracker is null || peer.Halted)
+        if (!CapturesSample(_auto, _tracker is not null, peer.Halted))
         {
             return;
         }
 
         Capture(json);
+        if (!ReadsSample(_auto, _tracker is not null, peer.Halted) || _tracker is null)
+        {
+            return;
+        }
+
         if (IsNoMatchLine(json))
         {
             if (MatchLeftHalts(_auto, _lastSnap is not null, peer.Halted, _summarised))
             {
                 _auto = false;
-                peer.HaltAndTell(MatchLeftReason);
+                _ = Task.Run(async () =>
+                {
+                    var running = true;
+                    for (var i = 0; i < GameGoneChecks && running; i++)
+                    {
+                        await Task.Delay(GameGoneCheckDelay);
+                        running = GameRunning();
+                    }
+
+                    peer.HaltAndTell(LeftOrClosedReason(running));
+                });
             }
 
             return;
@@ -685,8 +991,15 @@ internal static partial class Program
         _lastSnap = snap;
 
         IReadOnlyList<BoardSnapshot>? turn;
-        try { turn = _tracker.Push(snap); }
-        catch (Exception e) { Console.Error.WriteLine($"  auto: {e.Message}"); return; }
+        try
+        {
+            turn = _tracker.Push(snap);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"  auto: a sample could not be read ({e.GetType().Name})");
+            return;
+        }
 
         var over = TurnBoundary.MatchOver(snap, snap.LocalOwner);
 
@@ -806,6 +1119,7 @@ internal static partial class Program
         _boundaryPass = new TurnPassWatch(-1);
         _moveBoundsPending = false;
         _boundarySnap = null;
+        ForgetRecordings();
         ResetBoundary();
         _boundaryTail = 0;
         _pendingClosingHash = null;
@@ -1025,6 +1339,7 @@ internal static partial class Program
                     lock (_placementLock)
                     {
                         _writtenSlots.Clear();
+                        _writtenSquares.Clear();
                         _releasedPlacements = 0;
                         _auto = true;
                     }
@@ -1176,9 +1491,9 @@ internal static partial class Program
                     _watched.Add(e.Data);
                 }
 
-                if (_auto && autoPeer is not null)
+                if (autoPeer is { } peer && SampleGoesToAuto(_auto, _tracker is not null, peer.Halted))
                 {
-                    OnAutoSample(autoPeer, e.Data);
+                    OnAutoSample(peer, e.Data);
                 }
                 else if (_summarised && !_unsharedNoticed)
                 {
@@ -1192,7 +1507,7 @@ internal static partial class Program
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"  could not start {probe} --watch-snapshot: {e.Message}");
+            Console.Error.WriteLine(StartFailedLine($"{probe} --watch-snapshot", e));
             return null;
         }
     }
@@ -1238,7 +1553,7 @@ internal static partial class Program
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"  could not start {probe} --hold: {e.Message}");
+            Console.Error.WriteLine(StartFailedLine($"{probe} --hold", e));
             return null;
         }
     }
@@ -1261,7 +1576,7 @@ internal static partial class Program
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"  could not start {probe} --hold-placement: {e.Message}");
+            Console.Error.WriteLine(StartFailedLine($"{probe} --hold-placement", e));
             return null;
         }
     }
@@ -1282,7 +1597,7 @@ internal static partial class Program
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"  Warning: could not release the placement hold: {e.Message}");
+            Console.Error.WriteLine($"  Warning: could not release the placement hold ({e.GetType().Name})");
         }
     }
 
@@ -1301,7 +1616,7 @@ internal static partial class Program
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"  could not start {probe} --force-first: {e.Message}");
+            Console.Error.WriteLine(StartFailedLine($"{probe} --force-first", e));
             return null;
         }
     }
@@ -1405,7 +1720,7 @@ internal static partial class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"    could not run {probe}: {ex.Message}");
+            Console.Error.WriteLine($"    could not run {probe} ({ex.GetType().Name})");
             return null;
         }
     }

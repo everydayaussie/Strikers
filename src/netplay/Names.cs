@@ -9,6 +9,11 @@ internal static class Names
         return c is >= 'A' and <= 'Z' or >= '0' and <= '9';
     }
 
+    public static string Hex(string name)
+    {
+        return Convert.ToHexString(System.Text.Encoding.ASCII.GetBytes(name));
+    }
+
     public static string Clean(string? raw)
     {
         var kept = new System.Text.StringBuilder();

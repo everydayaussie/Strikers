@@ -13,6 +13,94 @@ internal static partial class Program
 
     private const int ProcessCreateThread = 0x0002;
 
+    private const int WriteAccess = ProcessVmWrite | ProcessVmOperation | ProcessCreateThread;
+
+    internal static readonly string[] KnownBuilds = ["667B1777-949F000"];
+
+    internal const int UnknownBuildExit = 9;
+
+    internal static string BuildText(uint stamp, uint size)
+    {
+        if (stamp == 0)
+        {
+            return $"size-{size:X}";
+        }
+
+        return $"{stamp:X8}-{size:X}";
+    }
+
+    internal static bool KnownBuild(string build)
+    {
+        return KnownBuilds.Contains(build, StringComparer.Ordinal);
+    }
+
+    internal static string UnknownBuildLine(string build)
+    {
+        return $"REFUSED: game build not supported: {build} is not one this live-probe knows, so it writes nothing into the game";
+    }
+
+    internal static bool WantsWrite(string[] args)
+    {
+        var firstAt = IndexOfArg(args, "--first");
+        var firstWrites = firstAt >= 0 &&
+                          !(firstAt + 1 < args.Length &&
+                            args[firstAt + 1].Equals("read", StringComparison.OrdinalIgnoreCase));
+
+        return args.Contains("--poke") || args.Contains("--inject-move") ||
+               args.Contains("--game-alloc") ||
+               args.Contains("--script-move") || args.Contains("--patch-reject") ||
+               args.Contains("--restore-reject") || args.Contains("--set-placement") ||
+               args.Contains("--place-one") || args.Contains("--hold-placement") ||
+               args.Contains("--set-rules") ||
+               args.Contains("--set-units") ||
+               args.Contains("--set-names") ||
+               args.Contains("--unlock-challenges") || args.Contains("--set-board") ||
+               args.Contains("--set-board-size") ||
+               args.Contains("--patch-move-bounds") || args.Contains("--commit-log") ||
+               args.Contains("--commit-ring") ||
+               args.Contains("--hold") || args.Contains("--highlight") ||
+               args.Contains("--freeze") || args.Contains("--force-first") ||
+               firstWrites ||
+               args.Contains("--script-turn") || args.Contains("--script-pass");
+    }
+
+    internal static bool RunsGameCode(string[] args)
+    {
+        return args.Contains("--game-alloc") ||
+               (args.Contains("--set-units") && args.Contains("--allocate"));
+    }
+
+    internal static int HandleAccess(string[] args)
+    {
+        var access = ProcessVmRead | ProcessQueryInformation;
+        if (WantsWrite(args))
+        {
+            access |= ProcessVmWrite | ProcessVmOperation;
+        }
+
+        if (RunsGameCode(args))
+        {
+            access |= ProcessCreateThread;
+        }
+
+        return access;
+    }
+
+    internal static string? UnknownBuildRefusal(string[] args, string build)
+    {
+        if ((HandleAccess(args) & WriteAccess) == 0)
+        {
+            return null;
+        }
+
+        if (KnownBuild(build))
+        {
+            return null;
+        }
+
+        return UnknownBuildLine(build);
+    }
+
     private const ulong GlobalRva = 0x8983150;
 
     private static volatile bool _parentGone;
@@ -167,22 +255,13 @@ internal static partial class Program
         if (args.Contains("--version"))
         {
             var mvid = typeof(Program).Assembly.ManifestModule.ModuleVersionId;
-            var (vFor, vExpires) = TestBuild.Read(typeof(Program).Assembly);
-            var mark = TestBuild.Mark(vFor, vExpires);
-            Console.WriteLine($"live-probe {mvid:N}"[..26] + (mark is null ? "" : $"  ({mark})"));
+            Console.WriteLine($"live-probe {mvid:N}"[..26]);
             return 0;
         }
 
         if (args.Contains("--selftest"))
         {
             return SelfTest();
-        }
-
-        var (_, testExpires) = TestBuild.Read(typeof(Program).Assembly);
-        if (!TestBuild.RestoreVerb(args) && TestBuild.Expired(testExpires, DateOnly.FromDateTime(DateTime.Now)))
-        {
-            Console.Error.WriteLine($"  {TestBuild.ExpiredMessage()}");
-            return 3;
         }
 
         if (args.Contains("--stop-draft-guard"))
@@ -197,10 +276,12 @@ internal static partial class Program
             return 1;
         }
 
+        string build;
         try
         {
             _base = (ulong)proc.MainModule!.BaseAddress;
             _moduleEnd = _base + (ulong)proc.MainModule.ModuleMemorySize;
+            build = BuildText(PeTimeDateStamp(proc.MainModule.FileName), (uint)proc.MainModule.ModuleMemorySize);
         }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
@@ -210,36 +291,23 @@ internal static partial class Program
 
         if (args.Contains("--build"))
         {
-            var size = (uint)proc.MainModule.ModuleMemorySize;
-            var stamp = PeTimeDateStamp(proc.MainModule.FileName);
-            Console.WriteLine(stamp == 0 ? $"size-{size:X}" : $"{stamp:X8}-{size:X}");
+            Console.WriteLine(build);
+            if (!KnownBuild(build))
+            {
+                Console.Error.WriteLine(UnknownBuildLine(build));
+                return UnknownBuildExit;
+            }
+
             return 0;
         }
 
-        var wants = args.Contains("--poke") || args.Contains("--inject-move") ||
-                    args.Contains("--alloc-bytes") ||
-                    args.Contains("--game-alloc") ||
-                    args.Contains("--fake-fact") || args.Contains("--hijack") ||
-                    args.Contains("--script-move") || args.Contains("--patch-reject") ||
-                    args.Contains("--restore-reject") || args.Contains("--set-placement") ||
-                    args.Contains("--place-one") || args.Contains("--hold-placement") ||
-                    args.Contains("--set-rules") ||
-                    args.Contains("--set-units") || args.Contains("--set-acted") ||
-                    args.Contains("--set-names") ||
-                    args.Contains("--unlock-challenges") || args.Contains("--set-board") ||
-                    args.Contains("--set-board-size") ||
-                    args.Contains("--patch-move-bounds") || args.Contains("--commit-log") ||
-                    args.Contains("--commit-ring") ||
-                    args.Contains("--park") || args.Contains("--hold") || args.Contains("--highlight") ||
-                    args.Contains("--freeze") || args.Contains("--force-first") ||
-                    (IndexOfArg(args, "--first") is var fa && fa >= 0 &&
-                     !(fa + 1 < args.Length && args[fa + 1].Equals("read", StringComparison.OrdinalIgnoreCase))) ||
-                    args.Contains("--script-turn") || args.Contains("--script-pass");
-        var runsGameCode = args.Contains("--game-alloc") ||
-                           (args.Contains("--set-units") && args.Contains("--allocate"));
-        var access = ProcessVmRead | ProcessQueryInformation | (wants ? ProcessVmWrite | ProcessVmOperation : 0)
-                     | (runsGameCode ? ProcessCreateThread : 0);
-        _handle = OpenProcess(access, false, proc.Id);
+        if (UnknownBuildRefusal(args, build) is { } refused)
+        {
+            Console.WriteLine(refused);
+            return UnknownBuildExit;
+        }
+
+        _handle = OpenProcess(HandleAccess(args), false, proc.Id);
         if (_handle == 0)
         {
             Console.Error.WriteLine($"OpenProcess failed ({Marshal.GetLastWin32Error()}). Try running as administrator.");
@@ -326,21 +394,12 @@ internal static partial class Program
             var bytesAt = IndexOfArg(args, "--find-bytes");
             if (bytesAt >= 0 && bytesAt + 1 < args.Length)
             {
-                return FindBytes(Convert.FromHexString(args[bytesAt + 1].Replace("0x", "")));
+                return FindBytes(Convert.FromHexString(args[bytesAt + 1].Replace("0x", "")), args.Contains("--heap"));
             }
 
             if (args.Contains("--find-ai"))
             {
                 return FindAiPlayer(_base + (ulong)proc.MainModule.ModuleMemorySize);
-            }
-
-            var hijackAt = IndexOfArg(args, "--hijack");
-            if (hijackAt >= 0)
-            {
-                return Hijack((byte)ParseAddr(args, hijackAt + 1), (byte)ParseAddr(args, hijackAt + 2),
-                              (byte)ParseAddr(args, hijackAt + 3),
-                              hijackAt + 4 < args.Length && int.TryParse(args[hijackAt + 4], out var hj) ? hj : 300,
-                              args);
             }
 
             var terrainAt = IndexOfArg(args, "--watch-terrain");
@@ -369,28 +428,10 @@ internal static partial class Program
                 return HuntAi(huntAt + 1 < args.Length && int.TryParse(args[huntAt + 1], out var hs) ? hs : 120);
             }
 
-            var watchAiAt = IndexOfArg(args, "--watch-ai");
-            if (watchAiAt >= 0)
-            {
-                return WatchAi(watchAiAt + 1 < args.Length && int.TryParse(args[watchAiAt + 1], out var secs) ? secs : 30);
-            }
-
-            var factAt = IndexOfArg(args, "--fake-fact");
-            if (factAt >= 0)
-            {
-                return FakeFact(ParseAddr(args, factAt + 1), args);
-            }
-
             var pokeAt = IndexOfArg(args, "--poke");
             if (pokeAt >= 0)
             {
                 return Poke(ParseAddr(args, pokeAt + 1), args, pokeAt + 2);
-            }
-
-            var allocAt = IndexOfArg(args, "--alloc-bytes");
-            if (allocAt >= 0)
-            {
-                return AllocBytes(args, allocAt + 1);
             }
 
             var gameAllocAt = IndexOfArg(args, "--game-alloc");
@@ -422,14 +463,9 @@ internal static partial class Program
                 return ScriptActions([], args);
             }
 
-            if (args.Contains("--hold"))
+            if (IsAiHold(args))
             {
                 return Hold(args);
-            }
-
-            if (args.Contains("--park"))
-            {
-                return Park(args);
             }
 
             var firstAt = IndexOfArg(args, "--first");
@@ -464,11 +500,6 @@ internal static partial class Program
             if (placeAt >= 0)
             {
                 return SetPlacement(args, placeAt + 1);
-            }
-
-            if (args.Contains("--list-units"))
-            {
-                return ListUnits(_base + (ulong)proc.MainModule.ModuleMemorySize);
             }
 
             if (args.Contains("--find-draft"))
@@ -546,12 +577,6 @@ internal static partial class Program
             if (args.Contains("--survey"))
             {
                 return Survey(_base + (ulong)proc.MainModule.ModuleMemorySize, args.Contains("--grids"));
-            }
-
-            var actedAt = IndexOfArg(args, "--set-acted");
-            if (actedAt >= 0)
-            {
-                return SetActed(args, actedAt + 1);
             }
 
             if (args.Contains("--set-names"))

@@ -1491,7 +1491,7 @@ internal static class MoveDetector
     private const int MaxRange = 3;
     private const int PushReach = MaxRange + 1;
 
-    private static (int Dx, int Dy) Step(byte facing)
+    internal static (int Dx, int Dy) Step(byte facing)
     {
         return (facing & 3) switch
         {

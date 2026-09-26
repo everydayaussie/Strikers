@@ -214,12 +214,32 @@ internal static partial class Program
     private static byte[] LabelPattern(string text)
     {
         var pattern = new byte[text.Length + 1];
-        System.Text.Encoding.ASCII.GetBytes(text).CopyTo(pattern, 0);
+        Encoding.ASCII.GetBytes(text).CopyTo(pattern, 0);
         pattern[text.Length] = 0;
         return pattern;
     }
 
-    private static List<ulong>[] ScanForMany(IReadOnlyList<byte[]> patterns, int maxPerPattern)
+    internal static List<int> MatchesIn(ReadOnlySpan<byte> span, byte[] pattern)
+    {
+        var found = new List<int>();
+        var from = 0;
+        while (from + pattern.Length <= span.Length)
+        {
+            var at = span[from..].IndexOf(pattern);
+            if (at < 0)
+            {
+                break;
+            }
+
+            found.Add(from + at);
+            from += at + 1;
+        }
+
+        return found;
+    }
+
+    private static List<ulong>[] ScanForMany(IReadOnlyList<byte[]> patterns, int maxPerPattern,
+                                             IReadOnlyList<(ulong Base, ulong Size)> regions)
     {
         var hits = new List<ulong>[patterns.Count];
         for (var i = 0; i < patterns.Count; i++)
@@ -230,7 +250,7 @@ internal static partial class Program
         var longest = patterns.Max(p => p.Length);
         var gate = new object();
 
-        Parallel.ForEach(ScanRegions(),
+        Parallel.ForEach(regions,
             new ParallelOptions { MaxDegreeOfParallelism = ScanThreads() },
             () => new byte[0x100000],
             (region, _, buf) =>
@@ -251,27 +271,14 @@ internal static partial class Program
                         continue;
                     }
 
+                    var span = new ReadOnlySpan<byte>(buf, 0, (int)got);
                     for (var p = 0; p < patterns.Count; p++)
                     {
-                        var pattern = patterns[p];
-                        for (var at = 0; at + pattern.Length <= (int)got; at++)
+                        foreach (var at in MatchesIn(span, patterns[p]))
                         {
-                            var match = true;
-                            for (var j = 0; j < pattern.Length; j++)
+                            lock (gate)
                             {
-                                if (buf[at + j] != pattern[j])
-                                {
-                                    match = false;
-                                    break;
-                                }
-                            }
-
-                            if (match)
-                            {
-                                lock (gate)
-                                {
-                                    hits[p].Add(regionBase + off + (ulong)at);
-                                }
+                                hits[p].Add(regionBase + off + (ulong)at);
                             }
                         }
                     }
@@ -297,11 +304,13 @@ internal static partial class Program
     {
         var me = ArgAfter(args, "--me");
         var them = ArgAfter(args, "--them");
-        if (me is null && them is null)
+        var army = ArmyNameArg(args);
+        if (me is null && them is null && army is null)
         {
-            Console.Error.WriteLine("--set-names [--me <NAME>] [--them <NAME>] [--yes]");
+            Console.Error.WriteLine("--set-names [--me <NAME>] [--them <NAME>] [--army-name <TEXT>] [--yes]");
             Console.Error.WriteLine($"  a name is 1 to {MaxNameLength} letters or digits, upper case.");
             Console.Error.WriteLine("  --me renames the left corner, --them the right corner AND the turn banner.");
+            Console.Error.WriteLine($"  --army-name replaces \"{StockSetLabel}\" on the set screen before the match.");
             return 1;
         }
 
@@ -314,62 +323,32 @@ internal static partial class Program
             }
         }
 
-        var plan = new List<(string What, ulong Addr, byte[] Bytes)>();
-
-        var sweep = System.Diagnostics.Stopwatch.StartNew();
-        var scan = ScanForMany([LabelPattern(AloyCorner), LabelPattern(OpponentCorner),
-                                System.Text.Encoding.ASCII.GetBytes(OpponentTurn)], 8);
-        Console.WriteLine($"  scanned for the labels in {sweep.Elapsed.TotalSeconds:0.0}s " +
-                          $"({ScanThreads()} threads)");
-
-        if (me is not null)
+        var wait = ArgIntOrNull(args, "--wait") ?? 0;
+        if (wait <= 0 && army is not null)
         {
-            var found = scan[0];
-            if (found.Count == 0)
+            if (args.Contains("--yes"))
             {
-                Console.Error.WriteLine($"  note: the '{AloyCorner}' label was not found, so your name " +
-                                        "was not written. Names may already be set, or the match is not loaded.");
-            }
-
-            foreach (var at in found)
-            {
-                PlanLabel(plan, "your corner", at, AloyCorner, me, MaxNameLength);
-            }
-        }
-
-        if (them is not null)
-        {
-            var found = scan[1];
-            if (found.Count == 0)
-            {
-                Console.Error.WriteLine($"  note: the '{OpponentCorner}' label was not found, so their " +
-                                        "name was not written.");
-            }
-
-            foreach (var at in found)
-            {
-                PlanLabel(plan, "their corner", at, OpponentCorner, them, OpponentCornerCap);
-            }
-
-            if (TurnBanner(them) is { } shown && shown.TrimEnd() != $"{them}'S TURN")
-            {
-                Console.WriteLine($"  note: the turn banner holds {BannerNameCap} letters of a name, so it " +
-                                  $"shows the first {BannerNameCap}.");
-            }
-
-            var bannerHits = scan[2];
-            if (bannerHits.Count == 1 && TurnBanner(them) is { } banner)
-            {
-                plan.Add(("their turn banner", bannerHits[0], System.Text.Encoding.ASCII.GetBytes(banner)));
+                new SetLabelHold(army).Tick(DateTime.UtcNow);
             }
             else
             {
-                Console.Error.WriteLine($"  note: the '{OpponentTurn}' banner was not found, so it was " +
-                                        "left alone.");
+                Console.WriteLine($"  the set screen's label would read \"{army}\" at: " +
+                                  string.Join(", ", FindSetLabels(verbose: true)
+                                      .Select(s => $"0x{s.Text:X} ({(s.Drawn ? "on screen" : "its source")})")));
             }
         }
 
-        if (plan.Count == 0)
+        var plan = wait > 0
+            ? AwaitNames(me, them, TimeSpan.FromSeconds(wait), army is null ? null : new SetLabelHold(army))
+            : PlanNames(me, them);
+        if (plan is null)
+        {
+            Console.WriteLine("  no match was live in time, or --play is gone, so no names were written");
+            return 2;
+        }
+
+        var holding = args.Contains(NamesHoldFlag) && args.Contains("--yes");
+        if (plan.Count == 0 && !holding)
         {
             Console.WriteLine("  nothing to rename.");
             return 0;
@@ -386,9 +365,257 @@ internal static partial class Program
             return 0;
         }
 
+        var wrote = WritePlan(plan);
+        Console.WriteLine($"\n  done, {wrote} of {plan.Count} written.");
+
+        if (holding)
+        {
+            return HoldNames(plan, me, them);
+        }
+
+        return 0;
+    }
+
+    internal static readonly TimeSpan NamesEntryPatience = TimeSpan.FromSeconds(20);
+
+    internal static bool SetLabelTicks(DateTime liveSince)
+    {
+        return liveSince == DateTime.MinValue;
+    }
+
+    private static List<(string What, ulong Addr, byte[] Bytes)>? AwaitNames(string? me, string? them, TimeSpan wait,
+                                                                          SetLabelHold? setLabel)
+    {
+        Console.WriteLine($"  waiting for a match to write the names on (up to {wait.TotalSeconds:0}s)");
+        var deadline = DateTime.UtcNow + wait;
+        var liveSince = DateTime.MinValue;
+        while (!_parentGone && DateTime.UtcNow < deadline)
+        {
+            if (LiveBoardShape().Logic == 0)
+            {
+                if (SetLabelTicks(liveSince))
+                {
+                    setLabel?.Tick(DateTime.UtcNow);
+                }
+
+                Thread.Sleep(500);
+                continue;
+            }
+
+            var now = DateTime.UtcNow;
+            if (liveSince == DateTime.MinValue)
+            {
+                liveSince = now;
+                setLabel?.Restore();
+            }
+
+            var plan = PlanNames(me, them, quiet: true);
+            if (NamesEntryDone(plan, me, them, now - liveSince))
+            {
+                return plan;
+            }
+
+            Thread.Sleep(1000);
+        }
+
+        setLabel?.Restore();
+        return null;
+    }
+
+    internal static bool NamesEntryDone(IReadOnlyList<(string What, ulong Addr, byte[] Bytes)> plan, string? me, string? them,
+                                        TimeSpan liveFor)
+    {
+        return !CornerMissing(plan, me, them) || liveFor >= NamesEntryPatience;
+    }
+
+    internal const string NamesHoldFlag = "--hold-names";
+
+    internal static bool IsAiHold(string[] args)
+    {
+        return args.Contains("--hold") && !args.Contains("--set-names");
+    }
+
+    internal const string NamesHeldLine = "  names written, holding until the match or --play ends";
+
+    internal static readonly TimeSpan NamesSettle = TimeSpan.FromSeconds(1);
+    internal static readonly TimeSpan NamesRetry = TimeSpan.FromSeconds(3);
+    internal static readonly TimeSpan NamesPatience = TimeSpan.FromSeconds(60);
+    internal static readonly TimeSpan NamesSlowRetry = TimeSpan.FromSeconds(10);
+    internal static readonly TimeSpan NamesSafetySweep = TimeSpan.FromSeconds(30);
+
+    private static int HoldNames(List<(string What, ulong Addr, byte[] Bytes)> plan, string? me, string? them)
+    {
+        Console.WriteLine(NamesHeldLine);
+        var misses = 0;
+        var lastSweep = DateTime.UtcNow;
+        var lostAt = DateTime.MinValue;
+        var toldMissing = false;
+        while (!_parentGone)
+        {
+            Thread.Sleep(500);
+            var live = LiveBoardShape();
+            misses = live.Logic == 0 ? misses + 1 : 0;
+            if (misses >= MoveBoundsGoneReads)
+            {
+                Console.WriteLine("  no match is live any more, the names hold ends");
+                return 0;
+            }
+
+            if (live.Logic == 0)
+            {
+                continue;
+            }
+
+            var now = DateTime.UtcNow;
+            var lost = NamesNeedRewrite(plan, ReadBack) || CornerMissing(plan, me, them);
+            if (!lost)
+            {
+                lostAt = DateTime.MinValue;
+                toldMissing = false;
+            }
+            else if (lostAt == DateTime.MinValue)
+            {
+                lostAt = now;
+            }
+
+            if (!NamesSweepDue(lost, now - lostAt, now - lastSweep))
+            {
+                continue;
+            }
+
+            lastSweep = now;
+            var kept = plan.Where(e => !NamesNeedRewrite([e], ReadBack)).ToList();
+            var swept = System.Diagnostics.Stopwatch.StartNew();
+            var (merged, fresh) = MergeNames(kept, PlanNames(me, them, quiet: true));
+            Console.WriteLine(NamesSweepLine(swept.Elapsed, fresh.Count));
+            plan = merged;
+            if (fresh.Count > 0)
+            {
+                var rewrote = WritePlan(fresh);
+                Console.WriteLine($"  names written again, {rewrote} of {fresh.Count}: the game rebuilt the corner labels");
+            }
+            else if (lost && !toldMissing)
+            {
+                Console.WriteLine("  the corner labels were rebuilt and are not found yet, trying again");
+                toldMissing = true;
+            }
+        }
+
+        Console.WriteLine("  --play is gone, or Ctrl+C was pressed, the names hold ends");
+        return 0;
+    }
+
+    private static byte[]? ReadBack((ulong Addr, int Length) at)
+    {
+        return TryRead(at.Addr, at.Length, out var now) ? now : null;
+    }
+
+    internal static bool CornerMissing(IReadOnlyList<(string What, ulong Addr, byte[] Bytes)> plan, string? me, string? them)
+    {
+        var mine = me is null || plan.Any(e => e.What == "your corner");
+        var theirs = them is null || plan.Any(e => e.What == "their corner");
+        return !mine || !theirs;
+    }
+
+    internal static string NamesSweepLine(TimeSpan took, int toWrite)
+    {
+        var what = toWrite == 0 ? "nothing to write" : $"{toWrite} to write";
+        return $"  names hold swept the game's memory in {(int)took.TotalMilliseconds} ms, {what}";
+    }
+
+    internal static bool NamesSweepDue(bool lost, TimeSpan lostFor, TimeSpan sinceSweep)
+    {
+        if (!lost)
+        {
+            return sinceSweep >= NamesSafetySweep;
+        }
+
+        if (lostFor < NamesSettle)
+        {
+            return false;
+        }
+
+        var every = lostFor < NamesPatience ? NamesRetry : NamesSlowRetry;
+        return sinceSweep >= every;
+    }
+
+    internal static (List<(string What, ulong Addr, byte[] Bytes)> Merged, List<(string What, ulong Addr, byte[] Bytes)> Fresh)
+        MergeNames(List<(string What, ulong Addr, byte[] Bytes)> kept, List<(string What, ulong Addr, byte[] Bytes)> found)
+    {
+        var merged = new List<(string What, ulong Addr, byte[] Bytes)>(kept);
+        var fresh = new List<(string What, ulong Addr, byte[] Bytes)>();
+        foreach (var entry in found)
+        {
+            var same = merged.FindIndex(e => e.Addr == entry.Addr);
+            if (same >= 0 && merged[same].Bytes.SequenceEqual(entry.Bytes))
+            {
+                continue;
+            }
+
+            if (same >= 0)
+            {
+                merged[same] = entry;
+            }
+            else
+            {
+                merged.Add(entry);
+            }
+
+            fresh.Add(entry);
+        }
+
+        return (merged, fresh);
+    }
+
+    internal static bool NamesNeedRewrite(IReadOnlyList<(string What, ulong Addr, byte[] Bytes)> plan,
+                                          Func<(ulong Addr, int Length), byte[]?> read)
+    {
+        foreach (var (_, addr, bytes) in plan)
+        {
+            var now = read((addr, bytes.Length));
+            if (now is null || !now.SequenceEqual(bytes))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static byte[]? StockAt(string what)
+    {
+        return what switch
+        {
+            "your corner" => LabelPattern(AloyCorner),
+            "their corner" => LabelPattern(OpponentCorner),
+            "your corner length" => BitConverter.GetBytes((uint)AloyCorner.Length),
+            "their corner length" => BitConverter.GetBytes((uint)OpponentCorner.Length),
+            "their turn banner" => Encoding.ASCII.GetBytes(OpponentTurn),
+            _ => null,
+        };
+    }
+
+    internal static bool StillStock(byte[]? now, byte[]? stock, bool labelLeftAlone)
+    {
+        return !labelLeftAlone && now is not null && stock is not null && now.AsSpan().SequenceEqual(stock);
+    }
+
+    private static int WritePlan(List<(string What, ulong Addr, byte[] Bytes)> plan)
+    {
         var wrote = 0;
+        var leftAlone = new HashSet<ulong>();
         foreach (var (what, addr, bytes) in plan)
         {
+            var stock = StockAt(what);
+            var now = stock is not null && TryRead(addr, stock.Length, out var read) ? read : null;
+            var isLength = what.EndsWith(" length", StringComparison.Ordinal);
+            if (!StillStock(now, stock, isLength && leftAlone.Contains(addr + 8)))
+            {
+                leftAlone.Add(addr);
+                Console.Error.WriteLine($"  note: {what} at 0x{addr:X} no longer reads as the game's own label, left alone.");
+                continue;
+            }
+
             if (Write(addr, bytes))
             {
                 wrote++;
@@ -399,8 +626,70 @@ internal static partial class Program
             }
         }
 
-        Console.WriteLine($"\n  done, {wrote} of {plan.Count} written.");
-        return 0;
+        return wrote;
+    }
+
+    private static List<(string What, ulong Addr, byte[] Bytes)> PlanNames(string? me, string? them, bool quiet = false)
+    {
+        var plan = new List<(string What, ulong Addr, byte[] Bytes)>();
+
+        var sweep = System.Diagnostics.Stopwatch.StartNew();
+        var scan = ScanForMany([LabelPattern(AloyCorner), LabelPattern(OpponentCorner),
+                                Encoding.ASCII.GetBytes(OpponentTurn)], 8, ScanRegions(heapOnly: true));
+        if (!quiet)
+        {
+            Console.WriteLine($"  scanned for the labels in {sweep.Elapsed.TotalSeconds:0.0}s " +
+                              $"({ScanThreads()} threads)");
+        }
+
+        if (me is not null)
+        {
+            var found = scan[0];
+            if (found.Count == 0 && !quiet)
+            {
+                Console.Error.WriteLine($"  note: the '{AloyCorner}' label was not found, so your name " +
+                                        "was not written. Names may already be set, or the match is not loaded.");
+            }
+
+            foreach (var at in found)
+            {
+                PlanLabel(plan, "your corner", at, AloyCorner, me, MaxNameLength);
+            }
+        }
+
+        if (them is not null)
+        {
+            var found = scan[1];
+            if (found.Count == 0 && !quiet)
+            {
+                Console.Error.WriteLine($"  note: the '{OpponentCorner}' label was not found, so their " +
+                                        "name was not written.");
+            }
+
+            foreach (var at in found)
+            {
+                PlanLabel(plan, "their corner", at, OpponentCorner, them, OpponentCornerCap);
+            }
+
+            if (TurnBanner(them) is { } shown && shown.TrimEnd() != $"{them}'S TURN" && !quiet)
+            {
+                Console.WriteLine($"  note: the turn banner holds {BannerNameCap} letters of a name, so it " +
+                                  $"shows the first {BannerNameCap}.");
+            }
+
+            var bannerHits = scan[2];
+            if (bannerHits.Count == 1 && TurnBanner(them) is { } banner)
+            {
+                plan.Add(("their turn banner", bannerHits[0], Encoding.ASCII.GetBytes(banner)));
+            }
+            else if (!quiet)
+            {
+                Console.Error.WriteLine($"  note: the '{OpponentTurn}' banner was not found, so it was " +
+                                        "left alone.");
+            }
+        }
+
+        return plan;
     }
 
     private static void PlanLabel(List<(string What, ulong Addr, byte[] Bytes)> plan, string what,
@@ -441,7 +730,7 @@ internal static partial class Program
     private static byte[] Terminated(string name)
     {
         var bytes = new byte[name.Length + 1];
-        System.Text.Encoding.ASCII.GetBytes(name).CopyTo(bytes, 0);
+        Encoding.ASCII.GetBytes(name).CopyTo(bytes, 0);
         bytes[name.Length] = 0;
         return bytes;
     }
@@ -1080,6 +1369,21 @@ internal static partial class Program
         return 0;
     }
 
+    internal static ulong FreezeTarget(ulong inst, ulong challengeVtable, ulong moduleBase)
+    {
+        if (inst == 0)
+        {
+            return 0;
+        }
+
+        if (challengeVtable != moduleBase + BoardGameChallengeRva)
+        {
+            return 0;
+        }
+
+        return inst + PauseFlags;
+    }
+
     private static int Freeze(bool on)
     {
         var chain = Walk(report: false);
@@ -1089,8 +1393,15 @@ internal static partial class Program
             return 2;
         }
 
+        var target = FreezeTarget(chain.Inst, ReadPtr(chain.Challenge), _base);
+        if (target == 0)
+        {
+            Console.Error.WriteLine("The challenge being played is not a Machine Strike one, so nothing was frozen.");
+            return 2;
+        }
+
         var value = (byte)(on ? 1 : 0);
-        if (!Write(chain.Inst + 0x29, [value, value]))
+        if (!Write(target, [value, value]))
         {
             return 1;
         }
@@ -1138,10 +1449,13 @@ internal static partial class Program
         return written > 0 ? 0 : 1;
     }
 
-    private static int FindBytes(byte[] pattern)
+    private static int FindBytes(byte[] pattern, bool heapOnly)
     {
-        Console.WriteLine($"\n  scanning for {Convert.ToHexString(pattern)} ({pattern.Length} bytes)");
-        var hits = ScanFor(pattern, 64);
+        Console.WriteLine($"\n  scanning for {Convert.ToHexString(pattern)} ({pattern.Length} bytes)" +
+                          (heapOnly ? ", private read-write memory only" : ""));
+        var hits = heapOnly
+            ? ScanForMany([pattern], 64, ScanRegions(heapOnly: true))[0]
+            : ScanFor(pattern, 64);
 
         foreach (var h in hits)
         {
@@ -1221,104 +1535,9 @@ internal static partial class Program
         return hits;
     }
 
-    private static int FakeFact(ulong resource, string[] args)
-    {
-        if (resource == 0)
-        {
-            Console.Error.WriteLine("--fake-fact <AIBoardGamePlayer addr> [--yes]");
-            return 1;
-        }
-
-        var field = resource + 0x78;
-        Console.WriteLine($"\n  resource   0x{resource:X}");
-        Console.WriteLine($"    +0x48 difficulty  low {ReadF(resource + 0x48):F2}  " +
-                          $"med {ReadF(resource + 0x4C):F2}  high {ReadF(resource + 0x50):F2}");
-        Console.WriteLine($"    +0x78 DisableAIMovesFact currently 0x{ReadPtr(field):X}");
-
-        if (!args.Contains("--yes"))
-        {
-            Console.WriteLine("\n  would allocate a page, write a fact reading true, and point +0x78 at it.");
-            Console.WriteLine("  dry run, nothing written. Add --yes to apply.");
-            return 0;
-        }
-
-        var page = (ulong)VirtualAllocEx(_handle, 0, 0x1000, 0x1000 | 0x2000, 0x04);
-        if (page == 0)
-        {
-            Console.Error.WriteLine($"  VirtualAllocEx failed ({Marshal.GetLastWin32Error()}).");
-            return 1;
-        }
-
-        var fact = new byte[0x40];
-        fact[0x28] = 1;
-        if (!Write(page, fact))
-        {
-            return 1;
-        }
-
-        if (!Write(field, BitConverter.GetBytes(page)))
-        {
-            return 1;
-        }
-
-        Console.WriteLine($"\n  allocated  0x{page:X}  (value 1 at +0x28)");
-        Console.WriteLine($"  +0x78 now  0x{ReadPtr(field):X}");
-        Console.WriteLine($"\n  revert with:  --poke 0x{field:X} 0000000000000000 --yes");
-        return 0;
-    }
-
     private static float ReadF(ulong a)
     {
         return BitConverter.ToSingle(Read(a, 4));
-    }
-
-    private static int WatchAi(int seconds)
-    {
-        var chain = Walk(report: false);
-        if (chain.Logic == 0)
-        {
-            Console.Error.WriteLine("No match is live.");
-            return 2;
-        }
-
-        var vtable = _base + 0x190E8A0;
-        var ctrl = FindOne(vtable);
-        if (ctrl == 0)
-        {
-            Console.Error.WriteLine($"No AIBoardGamePlayingControllerInstance found (vtable 0x{vtable:X}).");
-            return 3;
-        }
-
-        var slot = ctrl + 0x350;
-        Console.WriteLine($"\n  controller 0x{ctrl:X}  polling +0x350 @0x{slot:X} for {seconds}s");
-        Console.WriteLine("  READY, end your turn now");
-
-        var until = DateTime.UtcNow.AddSeconds(seconds);
-        string last = "";
-
-        while (DateTime.UtcNow < until)
-        {
-            var lath = ReadPtr(slot);
-            var line = $"lathium 0x{lath:X}";
-
-            if (Sane(lath))
-            {
-                line += $"  vtable 0x{ReadPtr(lath):X}  result +0xF0 {ReadU32(lath + 0xF0)}" +
-                        $"  +0xF4 0x{ReadByte(lath + 0xF4):X2}  done 0x{ReadByte(lath + 0xFC):X2}" +
-                        $"  job {ReadU32(lath + 0x100)}";
-            }
-
-            if (line != last)
-            {
-                Console.WriteLine($"    {DateTime.UtcNow:HH:mm:ss.fff}  {line}");
-                last = line;
-            }
-
-            Thread.Sleep(10);
-        }
-
-        Console.WriteLine("\n  done polling");
-        return 0;
     }
 
     private static int HuntAi(int seconds)

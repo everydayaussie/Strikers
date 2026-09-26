@@ -28,6 +28,12 @@ public partial class BoardsPanel : UserControl
             .Where(b => b.Rows.Length == StrikeBoard.Size && b.Rows[0].Length == StrikeBoard.Size)
             .ToList();
         var design = eights[rng.Next(eights.Count)];
+        var named = Environment.GetEnvironmentVariable("STRIKERS_EDIT_BOARD");
+        if (Library.Boards.FirstOrDefault(b => b.Name == named) is { } asked)
+        {
+            design = asked;
+        }
+
         view.Board = Library.Build(design);
 
         BuildSwatches();
@@ -159,7 +165,7 @@ public partial class BoardsPanel : UserControl
         return ghost;
     }
 
-    private void FillGhosts(UniformGrid rows, double room, int columns)
+    private void FillGhosts(UniformGrid rows)
     {
         var real = 0;
         var ghosts = 0;
@@ -326,7 +332,7 @@ public partial class BoardsPanel : UserControl
             scroll.Height = cap;
         }
 
-        FillGhosts(rows, cap, columns);
+        FillGhosts(rows);
 
         ShelfFromBottom = root.Margin.Bottom + (sectionFixed - section.Margin.Top) + cap;
     }
@@ -394,7 +400,7 @@ public partial class BoardsPanel : UserControl
 
         if (typed.Length == 0)
         {
-            ToastRail.Show(ToastKind.Bad, "Name the board before saving it.");
+            ToastRail.Show(ToastKind.Bad, "Name the board first.");
             return;
         }
 
@@ -602,7 +608,7 @@ public partial class BoardsPanel : UserControl
                 try
                 {
                     await clipboard.SetValueAsync(DataFormat.Text, stored.ToShareString());
-                    ToastRail.Show(ToastKind.Good, $"Copied the board code for '{stored.Name}'.");
+                    ToastRail.Show(ToastKind.Good, "Board code copied.");
                 }
                 catch (Exception)
                 {
@@ -878,7 +884,7 @@ public partial class BoardsPanel : UserControl
             {
                 box.IsChecked = false;
                 ToastRail.Show(ToastKind.Info,
-                    "Mirror is off on a board with an odd number of rows: the middle row has no other half.");
+                    "Mirror needs an even number of rows, so it is off.");
             }
 
             return;

@@ -35,6 +35,38 @@ foreach ($p in $Property)
     }
 }
 
+$sdkLine = "Strikers needs the x64 .NET SDK, version 10.0.401 or newer: https://dotnet.microsoft.com/download/dotnet/10.0 (the x64 installer, not x86 or Arm64)."
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue))
+{
+    throw "dotnet is not installed or not on PATH. $sdkLine"
+}
+
+$least = [version]'10.0.401'
+$found = @()
+foreach ($line in @(dotnet --list-sdks 2>$null))
+{
+    if ("$line" -match '^(\d+\.\d+\.\d+)')
+    {
+        $found += [version]$Matches[1]
+    }
+}
+
+if ($found.Count -eq 0)
+{
+    throw "dotnet found no SDK at all, which is what an x86 SDK looks like to the x64 dotnet on PATH. $sdkLine"
+}
+
+if (-not ($found | Where-Object { $_ -ge $least }))
+{
+    throw "the newest SDK here is $(($found | Sort-Object)[-1]), and 10.0.400 or older cannot publish this build. $sdkLine"
+}
+
+$rid = @(dotnet --info 2>$null | Select-String '^\s*RID:\s*(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) | Select-Object -First 1
+if ("$rid" -ne 'win-x64')
+{
+    throw "dotnet reports RID '$rid', not win-x64. $sdkLine"
+}
+
 if (Get-Process Strikers, netplay, live-probe -ErrorAction SilentlyContinue)
 {
     throw "Close Strikers, netplay and live-probe first; a running exe cannot be published over."

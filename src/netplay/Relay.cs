@@ -167,17 +167,41 @@ internal sealed class Relay
         var listener = new TcpListener(bind ?? IPAddress.Any, port);
         listener.Start();
         Console.WriteLine($"relay listening on {bind ?? IPAddress.Any}:{port}");
+        await AcceptAll(listener, token);
+    }
 
+    internal async Task AcceptAll(TcpListener listener, CancellationToken token)
+    {
         try
         {
             while (!token.IsCancellationRequested)
             {
-                var client = await listener.AcceptTcpClientAsync(token);
+                var client = await NextClient(listener, token);
                 _ = Task.Run(() => Serve(client, token), token);
             }
         }
-        catch (OperationCanceledException) { }
-        finally { listener.Stop(); }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    private static async Task<TcpClient> NextClient(TcpListener listener, CancellationToken token)
+    {
+        while (true)
+        {
+            try
+            {
+                return await listener.AcceptTcpClientAsync(token);
+            }
+            catch (SocketException e) when (e.SocketErrorCode is SocketError.ConnectionReset
+                                                or SocketError.ConnectionAborted)
+            {
+            }
+        }
     }
 
     private async Task Serve(TcpClient client, CancellationToken token)
@@ -320,8 +344,58 @@ internal sealed class Relay
             }
 
             await CloseGracefully(client, refused);
-            Console.WriteLine($"  peer disconnected (seat {seat})");
+            var closed = CloseLine(seat, DateTime.UtcNow);
+            if (closed is not null)
+            {
+                Console.WriteLine(closed);
+            }
         }
+    }
+
+    internal string? CloseLine(int seat, DateTime now)
+    {
+        if (seat >= 0)
+        {
+            return $"  peer disconnected (seat {seat})";
+        }
+
+        var unseated = TellUnseated(now);
+        if (unseated == 0)
+        {
+            return null;
+        }
+
+        return UnseatedLine(unseated);
+    }
+
+    internal static readonly TimeSpan UnseatedQuiet = TimeSpan.FromSeconds(10);
+
+    private readonly Lock _unseatedGate = new();
+    private DateTime _unseatedToldAt = DateTime.MinValue;
+    private int _unseatedSinceTold;
+
+    private int TellUnseated(DateTime now)
+    {
+        lock (_unseatedGate)
+        {
+            _unseatedSinceTold++;
+            if (now - _unseatedToldAt < UnseatedQuiet)
+            {
+                return 0;
+            }
+
+            var count = _unseatedSinceTold;
+            _unseatedToldAt = now;
+            _unseatedSinceTold = 0;
+            return count;
+        }
+    }
+
+    private static string UnseatedLine(int count)
+    {
+        return count == 1
+            ? "  a connection closed before it took a seat"
+            : $"  {count} connections closed before they took a seat";
     }
 
     private static async Task CloseGracefully(TcpClient client, bool refused)

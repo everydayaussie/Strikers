@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Net.Http;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -183,6 +185,148 @@ public static class Release
         return new JsonObject { ["query"] = query }.ToJsonString();
     }
 
+    public const string GitHubApi = "https://api.github.com";
+
+    public const string GitHubRepo = "everydayaussie/Strikers";
+
+    private static readonly Regex RepoShape = new(
+        @"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$", RegexOptions.Compiled);
+
+    public static string? TagsUrl(string api, string repo)
+    {
+        if (!RepoShape.IsMatch(repo) || !api.StartsWith("https://", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return $"{api}/repos/{repo}/tags?per_page=100";
+    }
+
+    public static string ReleasesPageUrl(string repo)
+    {
+        return $"https://github.com/{repo}/releases";
+    }
+
+    public const string IssueTemplate = "problem.yml";
+
+    public static string IssuesUrl(string repo, string? title = null)
+    {
+        var page = $"https://github.com/{repo}/issues/new?template={IssueTemplate}";
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return page;
+        }
+
+        return $"{page}&title={Uri.EscapeDataString(title.Trim())}";
+    }
+
+    private static readonly Regex TagName = new(@"\Av?[0-9]+(?:\.[0-9]+)*\z", RegexOptions.Compiled);
+
+    public static string? NewestTagFrom(string? answer)
+    {
+        if (answer is null || answer.Length > MaxAnswerBytes)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(answer, new JsonDocumentOptions { MaxDepth = 16 });
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            string? best = null;
+            foreach (var tag in document.RootElement.EnumerateArray())
+            {
+                if (Child(tag, "name") is not { ValueKind: JsonValueKind.String } name)
+                {
+                    continue;
+                }
+
+                var text = name.GetString();
+                if (text is null || text.Length > 64)
+                {
+                    continue;
+                }
+
+                if (!TagName.IsMatch(text))
+                {
+                    continue;
+                }
+
+                var number = Clean(text);
+                if (number is not null && (best is null || Newer(number, best)))
+                {
+                    best = number;
+                }
+            }
+
+            return best;
+        }
+        catch (Exception e) when (e is JsonException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    public static async Task<(string? Newest, string Note)> FetchNewestTagAsync(string api, string repo, string agent,
+                                                                               TimeSpan total, TimeSpan quiet)
+    {
+        if (TagsUrl(api, repo) is not { } url)
+        {
+            return (null, "update check: the source repository is not a name GitHub could hold");
+        }
+
+        try
+        {
+            using var deadline = new CancellationTokenSource(total);
+            using var handler = new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                UseCookies = false,
+                ConnectTimeout = quiet,
+                AutomaticDecompression = System.Net.DecompressionMethods.None,
+            };
+            using var http = new HttpClient(handler)
+            {
+                Timeout = total,
+                MaxResponseContentBufferSize = MaxAnswerBytes,
+            };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd(agent);
+            http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+
+            using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                return (null, $"update check: GitHub answered {(int)response.StatusCode}");
+            }
+
+            if (response.Content.Headers.ContentLength is { } announced && announced > MaxAnswerBytes)
+            {
+                return (null, $"update check: GitHub sent more than {MaxAnswerBytes} bytes");
+            }
+
+            await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
+            var bytes = await Streams.ReadCappedAsync(body, MaxAnswerBytes, quiet, deadline.Token);
+            if (bytes is null)
+            {
+                return (null, $"update check: GitHub sent more than {MaxAnswerBytes} bytes");
+            }
+
+            var found = NewestTagFrom(System.Text.Encoding.UTF8.GetString(bytes));
+            return (found, found is null
+                ? "update check: the source repository names no version"
+                : $"update check: the newest on GitHub is {found}");
+        }
+        catch (Exception e) when (e is HttpRequestException or IOException or OperationCanceledException
+                                      or TimeoutException or InvalidOperationException)
+        {
+            return (null, "update check: could not reach GitHub");
+        }
+    }
+
     public static readonly TimeSpan AnswerWithin = TimeSpan.FromSeconds(20);
 
     public static readonly TimeSpan QuietWithin = TimeSpan.FromSeconds(10);
@@ -311,12 +455,26 @@ public static class Release
     {
         var mine = Clean(ours) ?? "an older version";
         var top = Clean(newest) ?? "newer";
-        return $"You have {mine}. The newest is {top}, on Nexus Mods.";
+        return $"You have {mine}. The newest is {top}.";
     }
 
     public static (string Headline, string Detail) DifferentVersionsText(string? ours, string? newest)
     {
-        return ("You and the other player have different versions of Strikers", Advice(ours, newest));
+        return ("You and your opponent have different versions of Strikers", Advice(ours, newest));
+    }
+
+    public static (string Headline, string Detail) GameUpdatedText(string? ours, string? newest)
+    {
+        const string headline = "Horizon Forbidden West was updated";
+        const string needs = "Strikers needs an update to work with it.";
+        var mine = Clean(ours);
+        var top = Clean(newest);
+        if (mine is not null && top is not null && Newer(top, mine))
+        {
+            return (headline, $"{needs} You have {mine} and the newest is {top}. Update Strikers, then try again.");
+        }
+
+        return (headline, $"{needs} Try again when a new version of Strikers is out.");
     }
 
     public static string TriedToJoinText(string? ours, string? newest)
@@ -330,19 +488,19 @@ public static class Release
         var top = Clean(newest);
         if (mine is null)
         {
-            return "Both of you update to the newest version from the Nexus page, then try again.";
+            return "Both of you update to the newest version, then try again.";
         }
 
         if (top is not null && Newer(top, mine))
         {
-            return $"You have {mine} and the newest is {top}. Update from the Nexus page, then try again.";
+            return $"You have {mine} and the newest is {top}. Update Strikers, then try again.";
         }
 
         if (top is not null)
         {
-            return $"You have {mine}, the newest. The other player needs to update from the Nexus page, then try again.";
+            return $"You have {mine}, the newest. The other player needs to update, then try again.";
         }
 
-        return $"You have {mine}. Whoever has the older version updates from the Nexus page, then you both try again.";
+        return $"You have {mine}. Whoever has the older version updates, then you both try again.";
     }
 }

@@ -2,95 +2,6 @@ namespace Strikers.LiveProbe;
 
 internal static partial class Program
 {
-    private static int Hijack(byte action, byte src, byte dst, int seconds, string[] args)
-    {
-        var res = FindOne(_base + 0x190E7A8);
-        if (res == 0)
-        {
-            Console.Error.WriteLine("AIBoardGamePlayer not found.");
-            return 3;
-        }
-
-        Console.WriteLine($"\n  AIBoardGamePlayer 0x{res:X}");
-        Console.WriteLine($"  will inject: action 0x{action:X2}  src 0x{src:X2} ({src & 0xF},{src >> 4})  " +
-                          $"dst 0x{dst:X2} ({dst & 0xF},{dst >> 4})");
-
-        if (!args.Contains("--yes"))
-        {
-            Console.WriteLine("\n  dry run, nothing written. Add --yes to apply.");
-            return 0;
-        }
-
-        var waits = new[] { res + 0x5C, res + 0x64, res + 0x6C };
-        var saved = waits.Select(a => Read(a, 8)).ToArray();
-        var slow = new byte[8];
-        BitConverter.GetBytes(20.0f).CopyTo(slow, 0);
-        BitConverter.GetBytes(20.0f).CopyTo(slow, 4);
-        foreach (var a in waits)
-        {
-            Write(a, slow);
-        }
-
-        Console.WriteLine("  AI slowed to 20s per action");
-
-        try
-        {
-            var vtable = _base + 0x1906AD0;
-            var until = DateTime.UtcNow.AddSeconds(seconds);
-            Console.WriteLine("  READY, end your turn now");
-
-            while (DateTime.UtcNow < until)
-            {
-                var obj = FindOne(vtable, res >> 40);
-                if (obj == 0)
-                {
-                    continue;
-                }
-
-                Console.WriteLine($"    found LathiumPlayerEasy at 0x{obj:X}");
-
-                var mine = new byte[] { action, src, dst, 0 };
-                var writes = 0;
-                var seen = new HashSet<string>();
-
-                var mineHex = Convert.ToHexString(mine);
-
-                while (DateTime.UtcNow < until && ReadPtr(obj) == vtable)
-                {
-                    var asHex = Convert.ToHexString(Read(obj + 0xF0, 4));
-                    if (asHex != mineHex)
-                    {
-                        if (seen.Add(asHex))
-                        {
-                            Console.WriteLine($"    {DateTime.UtcNow:HH:mm:ss.fff}  AI wrote {asHex} " +
-                                              $"(done {ReadByte(obj + 0xFC):X2}), overwriting");
-                        }
-
-                        Write(obj + 0xF0, mine);
-                        writes++;
-                    }
-
-                    Thread.Sleep(1);
-                }
-
-                Console.WriteLine($"    object gone after {writes} write(s) of {Convert.ToHexString(mine)}");
-                return 0;
-            }
-
-            Console.WriteLine("  never caught the decision");
-            return 4;
-        }
-        finally
-        {
-            for (var i = 0; i < waits.Length; i++)
-            {
-                Write(waits[i], saved[i]);
-            }
-
-            Console.WriteLine("  AI wait times restored");
-        }
-    }
-
     private static int ScriptMove(string[] args, int firstArg)
     {
         if (firstArg + 3 >= args.Length)
@@ -244,6 +155,23 @@ internal static partial class Program
 
     private const int SpreadSkill = 5;
 
+    private const int DashPattern = 2;
+
+    private const int RamPattern = 3;
+
+    private const int DivePattern = 4;
+
+    private static (int X, int Y) FacingStep(byte facing)
+    {
+        return (facing & 3) switch
+        {
+            0 => (0, -1),
+            1 => (1, 0),
+            2 => (0, 1),
+            _ => (-1, 0),
+        };
+    }
+
     private static bool InSpreadReach(int fromX, int fromY, byte facing, int range, int toX, int toY)
     {
         if (range < 1)
@@ -251,17 +179,98 @@ internal static partial class Program
             return false;
         }
 
-        var (dx, dy) = (facing & 3) switch
-        {
-            0 => (0, -1),
-            1 => (1, 0),
-            2 => (0, 1),
-            _ => (-1, 0),
-        };
+        var (dx, dy) = FacingStep(facing);
 
         var along = dx == 0 ? (toY - fromY) * dy : (toX - fromX) * dx;
         var aside = dx == 0 ? Math.Abs(toX - fromX) : Math.Abs(toY - fromY);
         return along >= 1 && along <= range && aside <= 1;
+    }
+
+    private static (int X, int Y)? ChargeLanding(int pattern, int range, int walkX, int walkY, byte facing)
+    {
+        if (pattern != DashPattern || range < 1)
+        {
+            return null;
+        }
+
+        var (stepX, stepY) = FacingStep(facing);
+        return (walkX + stepX * range, walkY + stepY * range);
+    }
+
+    private static string? LandingProblem((int X, int Y) land, int width, int height, bool occupied)
+    {
+        if (land.X < 0 || land.X >= width || land.Y < 0 || land.Y >= height)
+        {
+            return $"a Dash charging to ({land.X},{land.Y}) lands off a {width}x{height} board";
+        }
+
+        if (occupied)
+        {
+            return $"a Dash charging to ({land.X},{land.Y}) needs that square empty, and a machine stands on it";
+        }
+
+        return null;
+    }
+
+    private static string? ReachProblem(int pattern, int skill, int range,
+                                        int walkX, int walkY, byte facing, int dstX, int dstY)
+    {
+        var offLine = $"standing on ({walkX},{walkY}) facing {facing} does not put the victim " +
+                      $"({dstX},{dstY}) on the strike line, the attack would hit something else";
+
+        if (pattern != DashPattern)
+        {
+            var aligned = (facing & 3) switch
+            {
+                0 => dstX == walkX && dstY < walkY,
+                1 => dstY == walkY && dstX > walkX,
+                2 => dstX == walkX && dstY > walkY,
+                _ => dstY == walkY && dstX < walkX,
+            };
+
+            var swept = skill == SpreadSkill && InSpreadReach(walkX, walkY, facing, range, dstX, dstY);
+
+            if (!aligned && !swept)
+            {
+                return offLine;
+            }
+
+            return null;
+        }
+
+        var (stepX, stepY) = FacingStep(facing);
+        var along = stepX == 0 ? (dstY - walkY) * stepY : (dstX - walkX) * stepX;
+        var offPath = stepX == 0 ? Math.Abs(dstX - walkX) : Math.Abs(dstY - walkY);
+        var room = skill == SpreadSkill ? 1 : 0;
+        var tooFar = range >= 1 && along > range - 1;
+
+        if (along < 1 || tooFar || offPath > room)
+        {
+            return offLine;
+        }
+
+        return null;
+    }
+
+    private static int PatternOf(ulong unit)
+    {
+        return PatternOf(unit, ReadPtr, ReadPatternByte);
+    }
+
+    private static int ReadPatternByte(ulong address)
+    {
+        return TryRead(address, 1, out var patternByte) ? patternByte[0] : -1;
+    }
+
+    private static int PatternOf(ulong unit, Func<ulong, ulong> readPtr, Func<ulong, int> readByte)
+    {
+        var resource = readPtr(unit + 0x08);
+        if (!Sane(resource))
+        {
+            return -1;
+        }
+
+        return readByte(resource + 0x70);
     }
 
     private static (int Skill, int Range) SkillAndRange(ulong unit)
@@ -458,6 +467,561 @@ internal static partial class Program
 
         Check("an unreadable range reaches nothing",
               !InSpreadReach(3, 3, 0, -1, 4, 1) && !InSpreadReach(3, 3, 0, 0, 4, 1));
+
+        Check("a Dash's victim on the square its charge passes through is reached from the square it charges from",
+              ReachProblem(DashPattern, 0, 2, 2, 0, 2, 2, 1) is null);
+
+        Check("a victim beside the charge's path is reached by a Spread Dash and by no other",
+              ReachProblem(DashPattern, SpreadSkill, 2, 2, 0, 2, 3, 1) is null
+              && ReachProblem(DashPattern, 0, 2, 2, 0, 2, 3, 1) is not null);
+
+        Check("a Dash reaches nothing on its landing, beside its landing or behind its start",
+              ReachProblem(DashPattern, 0, 2, 2, 0, 2, 2, 2) is not null
+              && ReachProblem(DashPattern, SpreadSkill, 2, 2, 0, 2, 3, 2) is not null
+              && ReachProblem(DashPattern, 0, 2, 2, 1, 2, 2, 0) is not null);
+
+        Check("a charge armed from beyond its victim is refused, the shape that exited a game on 2026-09-22",
+              ReachProblem(DashPattern, 0, 2, 2, 3, 2, 2, 2)
+              == "standing on (2,3) facing 2 does not put the victim (2,2) on the strike line, the attack would hit something else");
+
+        Check("the charge of 2026-09-22 armed from the Charger's own square passes",
+              ReachProblem(DashPattern, 0, 2, 2, 1, 2, 2, 2) is null);
+
+        Check("a Strike machine given the same squares keeps the old verdicts",
+              ReachProblem(0, 0, 2, 2, 0, 2, 2, 1) is null
+              && ReachProblem(0, 0, 2, 2, 2, 2, 2, 1) is not null);
+
+        Check("a pattern that could not be read keeps the old verdicts as well",
+              ReachProblem(-1, 0, 2, 2, 0, 2, 2, 1) is null
+              && ReachProblem(-1, 0, 2, 2, 2, 2, 2, 1) is not null);
+
+        Check("a charge lands its range along its facing from the square it charges from, and only a Dash's",
+              ChargeLanding(DashPattern, 2, 2, 0, 2) == (2, 2)
+              && ChargeLanding(DashPattern, 3, 1, 1, 1) == (4, 1)
+              && ChargeLanding(0, 2, 2, 0, 2) is null
+              && ChargeLanding(DashPattern, -1, 2, 0, 2) is null);
+
+        Check("a charge landing off the board is refused, the shape that exited a player's game on 2026-09-19",
+              ChargeLanding(DashPattern, 2, 2, 0, 1) is { } crashLanding
+              && LandingProblem(crashLanding, 4, 5, false) == "a Dash charging to (4,0) lands off a 4x5 board");
+
+        Check("a charge landing on a machine is refused, and an empty landing on the board passes",
+              LandingProblem((2, 2), 4, 5, true) is not null
+              && LandingProblem((2, 2), 4, 5, false) is null);
+
+        var pointers = new Dictionary<ulong, ulong>
+        {
+            [0x20008] = 0x30000,
+        };
+        var bytes = new Dictionary<ulong, int>
+        {
+            [0x20070] = 0,
+            [0x30070] = DashPattern,
+        };
+
+        Check("a piece's pattern is read from its machine's resource, not from the staging bytes on the piece",
+              PatternOf(0x20000, a => pointers.GetValueOrDefault(a), a => bytes.GetValueOrDefault(a, -1)) == DashPattern);
+
+        Check("a piece whose resource pointer cannot be read has no pattern",
+              PatternOf(0x20000, a => 0UL, a => bytes.GetValueOrDefault(a, -1)) == -1);
+
+        Check("a Dash is judged by its own rule once its pattern is read, which refuses a victim on the landing",
+              ReachProblem(DashPattern, 0, 2, 2, 1, 2, 2, 3) is not null
+              && ReachProblem(0, 0, 2, 2, 1, 2, 2, 3) is null);
+
+        var dasher = new Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)>
+        {
+            [(2, 0)] = (DashPattern, 0, 2),
+        };
+
+        List<Act> chargeThenLandingVictim =
+        [
+            new Act(true, 2, 0, 2, 1, 2, false, 2, 0),
+            new Act(true, 2, 2, 2, 4, 2, true, 2, 2),
+        ];
+
+        List<Act> chargeThenPathVictim =
+        [
+            new Act(true, 2, 0, 2, 1, 2, false, 2, 0),
+            new Act(true, 2, 2, 2, 3, 2, true, 2, 2),
+        ];
+
+        Check("a Dash's numbers follow it to the end of its charge, so its next charge is judged as a Dash's",
+              TurnReachProblems(chargeThenLandingVictim, dasher).Count == 1
+              && TurnReachProblems(chargeThenPathVictim, dasher).Count == 0);
+
+        var strikers = new Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)>
+        {
+            [(1, 1)] = (0, 0, 1),
+            [(4, 4)] = (0, 0, 1),
+        };
+
+        List<Act> secondMisses =
+        [
+            new Act(true, 1, 1, 1, 0, 0, false, 1, 1),
+            new Act(true, 4, 4, 4, 3, 0, false, 6, 6),
+        ];
+
+        List<Act> secondReaches =
+        [
+            new Act(true, 1, 1, 1, 0, 0, false, 1, 1),
+            new Act(true, 4, 4, 4, 3, 0, false, 4, 4),
+        ];
+
+        Check("a second action whose stand square does not reach its victim is refused",
+              TurnReachProblems(secondMisses, strikers).Count == 1);
+
+        Check("the same turn with a second action that does reach passes",
+              TurnReachProblems(secondReaches, strikers).Count == 0);
+
+        var sweeper = new Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)>
+        {
+            [(1, 1)] = (0, SpreadSkill, 2),
+        };
+
+        List<Act> moveThenSweep =
+        [
+            new Act(false, 1, 1, 1, 3, 2, false),
+            new Act(true, 1, 3, 2, 4, 2, false, 1, 3),
+        ];
+
+        Check("a machine's own numbers follow it to the square it moved to",
+              TurnReachProblems(moveThenSweep, sweeper).Count == 0
+              && TurnReachProblems(moveThenSweep,
+                                   new Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)>()).Count == 1);
+
+        var placedElsewhere = new HashSet<(int X, int Y)> { (3, 0), (4, 7) };
+        Check("a late pin writes the record's square into its machine only when that square is on the board, " +
+              "in the AI seat's rows, not a Chasm under a machine that cannot fly, and holds no other machine",
+              LatePinProblem((2, 0), 8, 8, (0, 1), 0, 0, placedElsewhere) is null
+              && LatePinProblem((3, 0), 8, 8, (0, 1), 0, 0, placedElsewhere) is { } stacked
+              && stacked.Contains("another machine")
+              && LatePinProblem((2, 3), 8, 8, (0, 1), 0, 0, placedElsewhere) is not null
+              && LatePinProblem((8, 0), 8, 8, (0, 1), 0, 0, placedElsewhere) is not null
+              && LatePinProblem((2, 0), 8, 8, (0, 1), ChasmTile, 0, placedElsewhere) is not null
+              && LatePinProblem((2, 0), 8, 8, (0, 1), ChasmTile, DivePattern, placedElsewhere) is null
+              && LatePinProblem((2, 0), 8, 8, null, 0, 0, placedElsewhere) is not null
+              && LatePinProblem((2, 0), 8, 8, (0, 1), null, 0, placedElsewhere) is not null);
+
+        static GateUnit Unit(ulong id, int x, int y, int health, bool ai, int pattern, int range, int move,
+                             int skill = -1)
+        {
+            return new GateUnit(id, x, y, health, ai, pattern, skill, range, move);
+        }
+
+        static GateBoard Board(int width, int height, ulong active, params GateUnit[] units)
+        {
+            return new GateBoard(width, height, units, true, active);
+        }
+
+        static string? Verdict(GateBoard board, Act act, int k)
+        {
+            return JudgeBeforeStrike(board, act, k).Problem;
+        }
+
+        const ulong ours = 16;
+        const ulong ours2 = 24;
+        const ulong theirs = 32;
+        const ulong theirs2 = 40;
+        var burrower = Unit(ours, 1, 6, 4, true, 0, 1, 2);
+        var besideIt = Unit(ours2, 2, 6, 4, true, 0, 1, 2);
+        var enemyAhead = Unit(theirs, 1, 4, 4, false, 0, 1, 2);
+        var enemyAside = Unit(theirs2, 3, 4, 4, false, 0, 1, 2);
+        var field = Board(8, 8, ours, burrower, besideIt, enemyAhead, enemyAside);
+
+        Check("the board check refuses an action whose activate found nothing, or found the opponent's " +
+              "machine, which the game activates by its square alone, and passes the AI's own machine there",
+              Verdict(field with { Activated = false }, new Act(false, 5, 5, 5, 4, 0, false), 1) is { } nothing
+              && nothing.Contains("activated nothing") && nothing.Contains("action 2")
+              && Verdict(field with { Active = theirs2 }, new Act(false, 3, 4, 3, 5, 2, false), 0) is { } notOurs
+              && notOurs.Contains("would hand the computer the opponent's machine on (3,4)")
+              && Verdict(field, new Act(false, 2, 6, 2, 5, 0, false), 0) is { } dragged
+              && dragged.Contains("activated the machine on (1,6)")
+              && Verdict(field, new Act(false, 1, 6, 0, 6, 3, false), 0) is null);
+
+        var ramVictim = Unit(theirs, 4, 2, 4, false, 0, 1, 2);
+        var chargeVictim = Unit(theirs, 6, 2, 4, false, 0, 1, 2);
+        Check("the board check bounds the walk from the machine's real square by its move, one more for a " +
+              "move that does not strike, its range for a charge and one for a Ram",
+              Verdict(field, new Act(false, 1, 6, 1, 3, 0, false), 0) is null
+              && Verdict(field, new Act(false, 1, 6, 0, 3, 0, false), 0) is { } tooFar
+              && tooFar.Contains("walks the machine on (1,6) 4 squares")
+              && Verdict(field, new Act(true, 1, 6, 1, 4, 0, false, 1, 5), 0) is null
+              && Verdict(field with { Units = [burrower with { X = 0, Y = 7 }, besideIt, enemyAhead, enemyAside] },
+                         new Act(true, 0, 7, 1, 4, 0, false, 1, 5), 0) is { } strikeTooFar
+              && strikeTooFar.Contains("its move is 2")
+              && Verdict(Board(8, 8, ours2, burrower, Unit(ours2, 4, 6, 4, true, RamPattern, 1, 2), ramVictim),
+                         new Act(true, 4, 6, 4, 2, 0, false, 4, 3), 0) is null
+              && Verdict(Board(8, 8, ours2, burrower, Unit(ours2, 4, 7, 4, true, RamPattern, 1, 2), ramVictim),
+                         new Act(true, 4, 7, 4, 2, 0, false, 4, 3), 0) is { } ramTooFar
+              && ramTooFar.Contains("1 more is the most")
+              && Verdict(Board(8, 10, ours2, burrower, Unit(ours2, 6, 8, 4, true, DashPattern, 2, 3), chargeVictim),
+                         new Act(true, 6, 8, 6, 2, 0, false, 6, 3), 0) is null
+              && Verdict(Board(8, 10, ours2, burrower, Unit(ours2, 6, 9, 4, true, DashPattern, 2, 3), chargeVictim),
+                         new Act(true, 6, 9, 6, 2, 0, false, 6, 3), 0) is { } chargeTooFar
+              && chargeTooFar.Contains("2 more is the most"));
+
+        Check("the board check refuses a move or a strike square where another machine stands, the AI's or " +
+              "the opponent's, and passes the machine's own square and an empty one",
+              Verdict(field, new Act(false, 1, 6, 1, 4, 0, false), 0) is { } ontoTheirs
+              && ontoTheirs.Contains("moves the machine to (1,4), where the opponent's machine stands")
+              && Verdict(field, new Act(false, 1, 6, 2, 6, 1, false), 0) is { } ontoOurs
+              && ontoOurs.Contains("the AI's own machine")
+              && Verdict(field, new Act(true, 1, 6, 1, 4, 0, false, 1, 6), 0) is null
+              && Verdict(field, new Act(false, 1, 6, 0, 6, 3, false), 0) is null
+              && Verdict(field with { Units = [burrower, besideIt, enemyAhead, enemyAside, Unit(48, 1, 5, 4, false, 0, 1, 2)] },
+                         new Act(true, 1, 6, 1, 4, 0, false, 1, 5), 0) is { } strikeUnder
+              && strikeUnder.Contains("stands the machine on (1,5), where the opponent's machine stands"));
+
+        var dash = Unit(ours2, 6, 6, 4, true, DashPattern, 2, 3);
+        var dashVictim = Unit(theirs, 6, 5, 4, false, 0, 1, 2);
+        var dashSide = Unit(theirs2, 7, 6, 4, false, 0, 1, 2);
+        Check("a charge whose landing is off the board or held by a machine is refused, and an empty landing on the " +
+              "board passes",
+              Verdict(Board(8, 8, ours2, dash, dashVictim, dashSide), new Act(true, 6, 6, 6, 5, 0, false, 6, 6), 0)
+                  is null
+              && Verdict(Board(8, 8, ours2, dash, dashVictim, dashSide, Unit(48, 6, 4, 4, false, 0, 1, 2)),
+                         new Act(true, 6, 6, 6, 5, 0, false, 6, 6), 0) is { } heldLanding
+              && heldLanding.Contains("needs that square empty")
+              && Verdict(Board(8, 8, ours2, dash, dashVictim, dashSide), new Act(true, 6, 6, 7, 6, 1, false, 6, 6), 0)
+                  is { } offLanding
+              && offLanding.Contains("off a 8x8 board"));
+
+        Check("the board check refuses a strike on a square that holds no opponent's machine or lies off the line " +
+              "from where the machine stands, and passes a victim on the line",
+              Verdict(field, new Act(true, 1, 6, 1, 4, 0, false, 1, 6), 0) is null
+              && Verdict(field, new Act(true, 1, 6, 1, 5, 0, false, 1, 6), 0) is { } empty
+              && empty.Contains("strikes (1,5), which holds nothing")
+              && Verdict(field with { Active = ours2 }, new Act(true, 2, 6, 1, 6, 3, false, 2, 6), 0) is { } own
+              && own.Contains("the AI's own machine")
+              && Verdict(field, new Act(true, 1, 6, 3, 4, 0, false, 1, 6), 0) is { } offLine
+              && offLine.Contains("strike line"));
+
+        Check("D-243: the board check refuses an activate while another machine is still activated, the walk that " +
+              "puts it on that square, and passes the same machine's owed move and a closed activation",
+              JudgeBeforeActivate(field, new Act(false, 2, 6, 2, 5, 0, false), 1) is { Problem: { } drag, Dying: false }
+              && drag.Contains("walk that machine onto (2,6)") && drag.Contains("the AI's own machine")
+              && JudgeBeforeActivate(field, new Act(false, 1, 6, 1, 5, 0, false), 1).Problem is null
+              && JudgeBeforeActivate(field with { Activated = false }, new Act(false, 2, 6, 2, 5, 0, false), 1)
+                  .Problem is null
+              && JudgeBeforeActivate(field with { Active = 153 }, new Act(false, 2, 6, 2, 5, 0, false), 1)
+                  .Problem is null
+              && JudgeBeforeActivate(field with { Units = [burrower with { Health = 0 }, besideIt] },
+                                     new Act(false, 2, 6, 2, 5, 0, false), 1) is { Problem: not null, Dying: true });
+
+        var dyingOnStand = field with { Units = [burrower, besideIt, enemyAside, Unit(48, 1, 5, 0, false, 0, 1, 2)] };
+        var liveOnStand = field with { Units = [burrower, besideIt, enemyAside, Unit(48, 1, 5, 4, false, 0, 1, 2)] };
+        var stepAhead = new Act(false, 1, 6, 1, 5, 0, false);
+        GateJudgement StepAhead(GateBoard b)
+        {
+            return JudgeBeforeStrike(b, stepAhead, 1);
+        }
+
+        GateJudgement NextActivates(GateBoard b)
+        {
+            return JudgeBeforeActivate(b, new Act(false, 2, 6, 2, 5, 0, false), 1);
+        }
+
+        var nothingActive = field with { Activated = false };
+        Check("the board check waits for a torn read, a machine at 0 health on the square, nothing activated yet, or " +
+              "another machine still activated, inside its 150 ms and then refuses, and a settled board passes at once",
+              GateSettle(nothingActive, nothingActive, 10, GateSettleBudgetMs, StepAhead).Step == GateStep.Wait
+              && GateSettle(nothingActive, nothingActive, 150, GateSettleBudgetMs, StepAhead) is { Step: GateStep.Refuse } neverActivated
+              && neverActivated.Problem!.Contains("activated nothing") && neverActivated.Problem.Contains("still so after")
+              && GateSettle(field, field, 10, GateSettleBudgetMs, NextActivates).Step == GateStep.Wait
+              && GateSettle(field, field, 150, GateSettleBudgetMs, NextActivates) is { Step: GateStep.Refuse } stillOpen
+              && stillOpen.Problem!.Contains("is still activated") && stillOpen.Problem.Contains("still so after")
+              && GateSettle(null, field, 10, GateSettleBudgetMs, StepAhead).Step == GateStep.Wait
+              && GateSettle(field, field with { Active = ours2 }, 10, GateSettleBudgetMs, StepAhead).Step == GateStep.Wait
+              && GateSettle(null, field, 150, GateSettleBudgetMs, StepAhead) is { Step: GateStep.Refuse } torn
+              && torn.Problem!.Contains("did not read the same twice")
+              && GateSettle(dyingOnStand, dyingOnStand, 60, GateSettleBudgetMs, StepAhead).Step == GateStep.Wait
+              && GateSettle(dyingOnStand, dyingOnStand, 150, GateSettleBudgetMs, StepAhead) is { Step: GateStep.Refuse } stayed
+              && stayed.Problem!.Contains("still listed at 0 health")
+              && GateSettle(liveOnStand, liveOnStand, 0, GateSettleBudgetMs, StepAhead).Step == GateStep.Refuse
+              && GateSettle(field, field, 0, GateSettleBudgetMs, StepAhead).Step == GateStep.Pass);
+
+        Check("a verdict after the action's shortest delay, or after its record was consumed, is late, and one " +
+              "inside the delay is not",
+              !GateLate(25, 0.30, false) && GateLate(300, 0.30, false) && GateLate(25, 0.30, true)
+              && DelayFloor(float.NaN) == 0.30 && DelayFloor(-1f) == 0.30 && Math.Abs(DelayFloor(0.8f) - 0.8) < 1e-6);
+
+        var order = new List<string>();
+        var freezeTries = 0;
+        var holdsOnTry = 1;
+        bool Refuses()
+        {
+            order.Add("judge");
+            return true;
+        }
+
+        bool JudgeThrows()
+        {
+            order.Add("judge");
+            throw new InvalidOperationException("a read of the board failed");
+        }
+
+        var quietTries = new List<bool>();
+        var oursAnswers = new Queue<bool>();
+        bool Freezes(bool quiet)
+        {
+            order.Add("freeze");
+            quietTries.Add(quiet);
+            freezeTries++;
+            return freezeTries >= holdsOnTry;
+        }
+
+        bool StillOurs()
+        {
+            return oursAnswers.Count == 0 || oursAnswers.Dequeue();
+        }
+
+        void WaitsStill()
+        {
+            order.Add("wait");
+        }
+
+        void Detaches()
+        {
+            order.Add("detach");
+        }
+
+        void Tells(bool first, bool frozen)
+        {
+            order.Add(!first ? "tell-again" : frozen ? "tell" : "tell-open");
+        }
+
+        (bool? Stopped, string Calls) PollOnce(GateHalt halt, Func<bool> judge)
+        {
+            order.Clear();
+            bool? stopped;
+            try
+            {
+                stopped = halt.Poll(judge, Freezes, StillOurs, WaitsStill, Detaches, Tells);
+            }
+            catch (Exception)
+            {
+                stopped = null;
+            }
+
+            return (stopped, string.Join(",", order));
+        }
+
+        var inTime = new GateHalt();
+        var held = PollOnce(inTime, Refuses);
+        holdsOnTry = 99;
+        var open = new GateHalt();
+        var notHeld = PollOnce(open, Refuses);
+        Check("a refusal writes the freeze before any line is printed and before it detaches, always waits for the " +
+              "count to hold still between the two, and never detaches when the freeze could not be written",
+              held.Stopped == true && held.Calls == "judge,freeze,tell,wait,detach" && inTime.Detached
+              && notHeld.Calls == "judge,freeze,tell-open" && !open.Detached);
+
+        freezeTries = 0;
+        holdsOnTry = 3;
+        var retried = new GateHalt();
+        var retry1 = PollOnce(retried, Refuses);
+        var openAfterFirst = retried.Refused && !retried.Detached;
+        var retry2 = PollOnce(retried, Refuses);
+        var retry3 = PollOnce(retried, Refuses);
+        freezeTries = 0;
+        holdsOnTry = 99;
+        var never = new GateHalt();
+        var neverPolls = new List<(bool? Stopped, string Calls)>();
+        for (var poll = 0; poll < 5; poll++)
+        {
+            neverPolls.Add(PollOnce(never, Refuses));
+        }
+
+        Check("a refused turn whose freeze could not be written keeps polling without asking the check again, tries " +
+              "the freeze at every poll and detaches once it holds, and a freeze that never holds leaves the undo to " +
+              "the turn's end",
+              retry1.Stopped == false && openAfterFirst
+              && retry2.Stopped == false && retry2.Calls.Contains("freeze") && !retry2.Calls.Contains("judge")
+              && !retry2.Calls.Contains("detach")
+              && retry3.Stopped == true && retried.Detached && retry3.Calls.Contains("detach")
+              && !retry3.Calls.Contains("judge")
+              && neverPolls.All(p => p.Stopped == false && !p.Calls.Contains("detach"))
+              && neverPolls.Skip(1).All(p => p.Calls.EndsWith("freeze") && !p.Calls.Contains("judge"))
+              && never.Refused && !never.Detached);
+
+        freezeTries = 0;
+        holdsOnTry = 1;
+        var threwHeld = new GateHalt();
+        var afterThrowHeld = PollOnce(threwHeld, JudgeThrows);
+        freezeTries = 0;
+        holdsOnTry = 99;
+        var threwOpen = new GateHalt();
+        var afterThrowOpen = PollOnce(threwOpen, JudgeThrows);
+        Check("an exception inside the board check is a refusal: the freeze is tried, the records are detached only " +
+              "under it, and the exception never reaches the undo past the freeze",
+              afterThrowHeld.Stopped == true && threwHeld.Refused && threwHeld.Detached
+              && threwHeld.Failure == nameof(InvalidOperationException)
+              && afterThrowHeld.Calls.IndexOf("freeze") < afterThrowHeld.Calls.IndexOf("detach")
+              && afterThrowOpen.Stopped is not null && threwOpen.Refused && afterThrowOpen.Calls.Contains("freeze")
+              && threwOpen.Failure == nameof(InvalidOperationException));
+
+        freezeTries = 0;
+        holdsOnTry = 2;
+        var armedGone = new GateHalt();
+        var goneFirst = PollOnce(armedGone, Refuses);
+        oursAnswers.Enqueue(false);
+        var goneRetry = PollOnce(armedGone, Refuses);
+        var frozenWhileGone = armedGone.Frozen;
+        oursAnswers.Enqueue(true);
+        oursAnswers.Enqueue(false);
+        var goneBeforeDetach = PollOnce(armedGone, Refuses);
+        freezeTries = 0;
+        holdsOnTry = 1;
+        oursAnswers.Clear();
+        oursAnswers.Enqueue(false);
+        var goneAfterFirst = new GateHalt();
+        var goneUnderFirst = PollOnce(goneAfterFirst, Refuses);
+        oursAnswers.Clear();
+        Check("a retried freeze is written only while the match the turn was armed on is still ours, and the " +
+              "records are detached after any freeze only when it still is, else left to the undo at the turn's end",
+              goneFirst.Stopped == false && goneFirst.Calls == "judge,freeze,tell-open"
+              && goneRetry.Stopped == false && goneRetry.Calls == "" && !frozenWhileGone
+              && goneBeforeDetach.Stopped == true && goneBeforeDetach.Calls == "freeze,tell-again,wait"
+              && armedGone.Frozen && !armedGone.Detached
+              && goneUnderFirst.Stopped == true && goneUnderFirst.Calls == "judge,freeze,tell,wait"
+              && goneAfterFirst.Frozen && !goneAfterFirst.Detached);
+
+        freezeTries = 0;
+        holdsOnTry = 99;
+        quietTries.Clear();
+        var failing = new GateHalt();
+        for (var poll = 0; poll < 4; poll++)
+        {
+            PollOnce(failing, Refuses);
+        }
+
+        Check("a freeze whose write keeps failing reports the failure on its first try only",
+              quietTries.SequenceEqual([false, true, true, true]) && failing.FreezeFailures == 4);
+
+        var leftTheList = field with { Active = 153 };
+        Check("at B, a machine the game activated that has left the list is waited for inside the 150 ms and " +
+              "refused only at the budget",
+              GateSettle(leftTheList, leftTheList, 10, GateSettleBudgetMs, StepAhead).Step == GateStep.Wait
+              && GateSettle(leftTheList, leftTheList, 150, GateSettleBudgetMs, StepAhead) is { Step: GateStep.Refuse } leftRefused
+              && leftRefused.Problem!.Contains("is not on the board")
+              && leftRefused.Problem.Contains("still so after"));
+
+        var points = GatePoints([new Act(false, 1, 6, 1, 5, 0, false), new Act(true, 2, 6, 2, 4, 0, true, 2, 5),
+                                 new Act(false, 3, 6, 3, 5, 0, false)]);
+        Check("the board check runs after each action's activate or burst, and after each move or attack that " +
+              "another action follows",
+              points.Count == 5
+              && points[1] == new GatePoint(false, 0) && points[2] == new GatePoint(true, 1)
+              && points[4] == new GatePoint(false, 1) && points[5] == new GatePoint(true, 2)
+              && points[6] == new GatePoint(false, 2) && !points.ContainsKey(3) && !points.ContainsKey(7));
+
+        const int grazer = 257;
+        const int burrow = 258;
+        Check("a Ram's push and advance, its Overcharge move from its victim's square, and a strike then an " +
+              "Overcharge move onto the square a knockback emptied pass the board check (gate-v12, turn 1)",
+              Verdict(Board(8, 8, grazer, Unit(grazer, 4, 6, 4, true, RamPattern, 1, 2), Unit(burrow, 3, 6, 4, true, 0, 1, 2),
+                            Unit(theirs, 3, 4, 4, false, RamPattern, 1, 2), Unit(theirs2, 4, 4, 4, false, 0, 1, 2)),
+                      new Act(true, 4, 6, 4, 4, 0, false, 4, 5), 0) is null
+              && Verdict(Board(8, 8, grazer, Unit(grazer, 4, 4, 4, true, RamPattern, 1, 2), Unit(burrow, 3, 6, 4, true, 0, 1, 2),
+                               Unit(theirs, 3, 4, 4, false, RamPattern, 1, 2), Unit(theirs2, 4, 3, 3, false, 0, 1, 2)),
+                         new Act(false, 4, 4, 4, 5, 0, true), 1) is null
+              && Verdict(Board(8, 8, burrow, Unit(grazer, 4, 5, 2, true, RamPattern, 1, 2), Unit(burrow, 3, 6, 4, true, 0, 1, 2),
+                               Unit(theirs, 3, 4, 4, false, RamPattern, 1, 2), Unit(theirs2, 4, 3, 3, false, 0, 1, 2)),
+                         new Act(true, 3, 6, 3, 4, 0, false, 3, 5), 2) is null
+              && Verdict(Board(8, 8, burrow, Unit(grazer, 4, 5, 2, true, RamPattern, 1, 2), Unit(burrow, 3, 5, 3, true, 0, 1, 2),
+                               Unit(theirs, 3, 3, 3, false, RamPattern, 1, 2), Unit(theirs2, 4, 3, 3, false, 0, 1, 2)),
+                         new Act(false, 3, 5, 3, 4, 0, true), 3) is null);
+
+        const int tremor = 273;
+        const int plow = 274;
+        var hunterOurs = new[] { Unit(275, 5, 2, 8, true, 4, 3, 3, SpreadSkill), Unit(276, 5, 4, 4, true, RamPattern, 1, 3),
+                                 Unit(277, 3, 3, 7, true, 5, 3, 2) };
+        var hunterTheirs = new[] { Unit(289, 4, 0, 10, false, 1, 2, 2), Unit(290, 5, 0, 4, false, 0, 1, 2),
+                                   Unit(291, 3, 0, 7, false, 0, 1, 2) };
+        Check("a charge in place, the charger's owed move from its landing, and moves onto the square it charged from " +
+              "and onto its victim's square pass the board check (halt-hunter, turn 2)",
+              Verdict(Board(6, 5, tremor, [Unit(tremor, 4, 3, 10, true, DashPattern, 2, 2, SpreadSkill),
+                                           Unit(plow, 4, 4, 2, true, RamPattern, 1, 2), Unit(292, 4, 2, 3, false, 0, 1, 4),
+                                           .. hunterOurs, .. hunterTheirs]),
+                      new Act(true, 4, 3, 4, 2, 0, false, 4, 3), 0) is null
+              && JudgeBeforeActivate(Board(6, 5, tremor, [Unit(tremor, 4, 1, 10, true, DashPattern, 2, 2, SpreadSkill),
+                                                          Unit(plow, 4, 4, 2, true, RamPattern, 1, 2), .. hunterOurs, .. hunterTheirs]),
+                                     new Act(false, 4, 1, 5, 1, 3, false), 1).Problem is null
+              && Verdict(Board(6, 5, tremor, [Unit(tremor, 4, 1, 10, true, DashPattern, 2, 2, SpreadSkill),
+                                              Unit(plow, 4, 4, 2, true, RamPattern, 1, 2), .. hunterOurs, .. hunterTheirs]),
+                         new Act(false, 4, 1, 5, 1, 3, false), 1) is null
+              && Verdict(Board(6, 5, plow, [Unit(tremor, 5, 1, 10, true, DashPattern, 2, 2, SpreadSkill),
+                                            Unit(plow, 4, 4, 2, true, RamPattern, 1, 2), .. hunterOurs, .. hunterTheirs]),
+                         new Act(false, 4, 4, 4, 3, 1, false), 2) is null
+              && Verdict(Board(6, 5, plow, [Unit(tremor, 5, 1, 10, true, DashPattern, 2, 2, SpreadSkill),
+                                            Unit(plow, 4, 3, 2, true, RamPattern, 1, 2), .. hunterOurs, .. hunterTheirs]),
+                         new Act(false, 4, 3, 4, 2, 1, true), 3) is null);
+
+        const int chargerId = 305;
+        const int burrowerId = 306;
+        Check("a charge in place with the charger's move from its landing, and a walk then a charge, pass the board " +
+              "check (walk-then-charge-ending, PC2's turn 1 and PC1's last turn)",
+              Verdict(Board(4, 4, chargerId, Unit(chargerId, 1, 2, 4, true, DashPattern, 2, 3),
+                            Unit(burrowerId, 2, 2, 4, true, 0, 1, 2), Unit(theirs, 1, 1, 4, false, 0, 1, 2),
+                            Unit(theirs2, 3, 1, 4, false, DashPattern, 2, 3)),
+                      new Act(true, 1, 2, 1, 1, 0, false, 1, 2), 0) is null
+              && Verdict(Board(4, 4, chargerId, Unit(chargerId, 1, 0, 4, true, DashPattern, 2, 3),
+                               Unit(burrowerId, 2, 2, 4, true, 0, 1, 2), Unit(theirs, 1, 1, 2, false, 0, 1, 2),
+                               Unit(theirs2, 3, 1, 4, false, DashPattern, 2, 3)),
+                         new Act(false, 1, 0, 0, 0, 0, false), 1) is null
+              && Verdict(Board(4, 4, burrowerId, Unit(chargerId, 0, 0, 4, true, DashPattern, 2, 3),
+                               Unit(burrowerId, 2, 2, 4, true, 0, 1, 2), Unit(theirs, 1, 1, 2, false, 0, 1, 2),
+                               Unit(theirs2, 3, 1, 4, false, DashPattern, 2, 3)),
+                         new Act(false, 2, 2, 3, 2, 1, false), 2) is null
+              && Verdict(Board(4, 4, chargerId, Unit(chargerId, 1, 0, 4, true, DashPattern, 2, 3),
+                               Unit(burrowerId, 1, 2, 2, true, 0, 1, 2), Unit(theirs, 0, 2, 1, false, 0, 1, 2),
+                               Unit(theirs2, 3, 1, 2, false, DashPattern, 2, 3)),
+                         new Act(true, 1, 0, 3, 1, 2, false, 3, 0), 0) is null);
+
+        const int glint = 321;
+        const int fireclaw = 322;
+        var diveTheirs = new[] { Unit(337, 1, 1, 6, false, 4, 3, 2), Unit(338, 4, 3, 8, false, 0, 2, 2) };
+        Check("a Dive from its firing square, its Overcharge move onto its victim's square after the knockback, and " +
+              "another machine's walk, strike and Overcharge strike pass the board check (dying-attacker, turn 2)",
+              Verdict(Board(8, 8, glint, [Unit(glint, 5, 6, 5, true, 4, 3, 3), Unit(fireclaw, 5, 7, 10, true, 0, 2, 3),
+                                          Unit(theirs, 3, 5, 8, false, 0, 1, 2), Unit(theirs2, 7, 4, 5, false, 4, 2, 3),
+                                          .. diveTheirs]),
+                      new Act(true, 5, 6, 7, 4, 0, false, 7, 6), 0) is null
+              && Verdict(Board(8, 8, glint, [Unit(glint, 7, 5, 4, true, 4, 3, 3), Unit(fireclaw, 5, 7, 10, true, 0, 2, 3),
+                                             Unit(theirs, 3, 5, 8, false, 0, 1, 2), Unit(theirs2, 7, 3, 4, false, 4, 2, 3),
+                                             .. diveTheirs]),
+                         new Act(false, 7, 5, 7, 4, 0, true), 1) is null
+              && Verdict(Board(8, 8, fireclaw, [Unit(glint, 7, 4, 2, true, 4, 3, 3), Unit(fireclaw, 5, 7, 10, true, 0, 2, 3),
+                                                Unit(theirs, 3, 5, 8, false, 0, 1, 2), Unit(theirs2, 7, 3, 4, false, 4, 2, 3),
+                                                .. diveTheirs]),
+                         new Act(true, 5, 7, 3, 5, 0, false, 3, 6), 2) is null
+              && Verdict(Board(8, 8, fireclaw, [Unit(glint, 7, 4, 2, true, 4, 3, 3), Unit(fireclaw, 3, 6, 10, true, 0, 2, 3),
+                                                Unit(theirs, 3, 5, 6, false, 0, 1, 2), Unit(theirs2, 7, 3, 4, false, 4, 2, 3),
+                                                .. diveTheirs]),
+                         new Act(true, 3, 6, 3, 5, 0, true, 3, 6), 3) is null);
+
+        const int glinthawk = 353;
+        const int stormbird = 354;
+        var shotOurs = new[] { Unit(355, 0, 6, 9, true, 4, 3, 2), Unit(356, 2, 4, 9, true, 4, 3, 2),
+                               Unit(357, 3, 4, 7, true, 4, 2, 3), Unit(358, 4, 6, 7, true, 4, 2, 3) };
+        var shotTheirs = new[] { Unit(369, 5, 3, 6, false, 0, 2, 3), Unit(370, 4, 5, 11, false, DashPattern, 3, 2),
+                                 Unit(371, 2, 3, 5, false, 1, 2, 3) };
+        Check("a Dive that struck from where it walked and landed beside its victim, its Overcharge move that killed " +
+              "it, and another machine's move after pass the board check (inplace-shot-facing, PC2's turn 4)",
+              Verdict(Board(8, 8, glinthawk, [Unit(glinthawk, 4, 4, 2, true, 4, 3, 3),
+                                              Unit(stormbird, 2, 5, 1, true, 4, 3, 3, SpreadSkill), .. shotOurs, .. shotTheirs]),
+                      new Act(true, 4, 4, 5, 3, 0, false, 5, 5), 0) is null
+              && Verdict(Board(8, 8, glinthawk, [Unit(glinthawk, 5, 4, 2, true, 4, 3, 3),
+                                                 Unit(stormbird, 2, 5, 1, true, 4, 3, 3, SpreadSkill), .. shotOurs, .. shotTheirs]),
+                         new Act(false, 5, 4, 5, 5, 0, true), 1) is null
+              && JudgeBeforeActivate(Board(8, 8, glinthawk, [Unit(stormbird, 2, 5, 1, true, 4, 3, 3, SpreadSkill),
+                                                             .. shotOurs, .. shotTheirs]),
+                                     new Act(false, 2, 5, 1, 5, 2, false), 2).Problem is null
+              && Verdict(Board(8, 8, stormbird, [Unit(stormbird, 2, 5, 1, true, 4, 3, 3, SpreadSkill), .. shotOurs,
+                                                 .. shotTheirs]),
+                         new Act(false, 2, 5, 1, 5, 2, false), 2) is null);
+
         Check("a name of the full length is accepted",
               NameProblem("EXAMPLE1") is null && NameProblem("A") is null);
 
@@ -634,7 +1198,8 @@ internal static partial class Program
 
         var stub8 = MoveBoundsStub8(stubProbe + 0x1C0, 6);
         Check("stub 8 carries the builder's two instructions verbatim and ends in a jump back",
-              stub8[..11].SequenceEqual(MoveBoundsSite8Original) && stub8[^5] == 0xE9 &&
+              stub8[..7].SequenceEqual(MoveBoundsSite8Original[..7]) &&
+              stub8[27..31].SequenceEqual(MoveBoundsSite8Original[7..]) && stub8[^5] == 0xE9 &&
               MoveBoundsSite8Original.Length == 11 &&
               MoveBoundsSite8Original.Length == (int)(MoveBoundsSite8Back - MoveBoundsSite8Rva));
         Check("stub 8 on a 6-wide board zeroes two padding bytes at the row end and skips the counter by two",
@@ -643,9 +1208,218 @@ internal static partial class Program
               !Contains(stub8, [0xC6, 0x44, 0x11, 0x73, 0x00]) &&
               Contains(stub8, [0x83, 0x82, 0xB0, 0x00, 0x00, 0x00, 0x02]));
         Check("stub 8's row-end skip lands exactly on the jump back",
-              stub8[22] == 0x75 && stub8[23] == 17 && stub8.Length == 46);
-        Check("stub 8 on an 8-wide board is the displaced pair and the jump back alone",
-              MoveBoundsStub8(stubProbe + 0x1C0, 8).Length == 16);
+              stub8[42] == 0x75 && stub8[43] == 17 && stub8.Length == 66);
+        Check("stub 8 on an 8-wide board is the displaced pair, the cap and the jump back",
+              MoveBoundsStub8(stubProbe + 0x1C0, 8).Length == 36);
+
+        const int moveTableAt = 0x70;
+        const int moveCountAt = 0xB0;
+        static string? Stub8Run(byte[] code, ulong stubAt, ulong backTo, byte[] frame, byte terrain)
+        {
+            long rcx = 0;
+            long r10 = 0;
+            var below = false;
+            var equal = false;
+            var ip = 0;
+            for (var steps = 0; steps < 64; steps++)
+            {
+                var left = code.Length - ip;
+                if (ip < 0 || left <= 0)
+                {
+                    return $"ran off the stub at {ip}";
+                }
+
+                var op = code[ip];
+                var second = left > 1 ? code[ip + 1] : (byte)0;
+                var third = left > 2 ? code[ip + 2] : (byte)0;
+                if (op == 0x48 && second == 0x63 && third == 0x8A && left >= 7)
+                {
+                    var at = BitConverter.ToInt32(code, ip + 3);
+                    if (at != moveCountAt)
+                    {
+                        return $"the index is read from +0x{at:X}";
+                    }
+
+                    rcx = BitConverter.ToInt32(frame, at);
+                    ip += 7;
+                }
+                else if (op == 0x83 && second == 0xF9 && left >= 3)
+                {
+                    var against = (uint)(sbyte)third;
+                    below = (uint)rcx < against;
+                    equal = (uint)rcx == against;
+                    ip += 3;
+                }
+                else if (op == 0x72 && left >= 2)
+                {
+                    ip += below ? 2 + (sbyte)second : 2;
+                }
+                else if (op == 0x75 && left >= 2)
+                {
+                    ip += equal ? 2 : 2 + (sbyte)second;
+                }
+                else if (op == 0xC7 && second == 0x82 && left >= 10)
+                {
+                    var at = BitConverter.ToInt32(code, ip + 2);
+                    if (at != moveCountAt)
+                    {
+                        return $"a dword is set at +0x{at:X}";
+                    }
+
+                    Array.Copy(code, ip + 6, frame, at, 4);
+                    ip += 10;
+                }
+                else if (op == 0x83 && second == 0x82 && left >= 7)
+                {
+                    var at = BitConverter.ToInt32(code, ip + 2);
+                    if (at != moveCountAt)
+                    {
+                        return $"a dword is added to at +0x{at:X}";
+                    }
+
+                    BitConverter.GetBytes(BitConverter.ToInt32(frame, at) + (sbyte)code[ip + 6]).CopyTo(frame, at);
+                    ip += 7;
+                }
+                else if (op == 0x88 && second == 0x44 && third == 0x11 && left >= 4)
+                {
+                    var at = rcx + (sbyte)code[ip + 3];
+                    if (at < moveTableAt || at >= moveCountAt)
+                    {
+                        return $"a square's terrain is stored at +0x{at:X}, outside the table";
+                    }
+
+                    frame[(int)at] = terrain;
+                    ip += 4;
+                }
+                else if (op == 0xC6 && second == 0x44 && third == 0x11 && left >= 5)
+                {
+                    var at = rcx + (sbyte)code[ip + 3];
+                    if (at < moveTableAt || at >= moveCountAt)
+                    {
+                        return $"a padding byte is stored at +0x{at:X}, outside the table";
+                    }
+
+                    frame[(int)at] = code[ip + 4];
+                    ip += 5;
+                }
+                else if (op == 0x41 && second == 0x89 && third == 0xCA && left >= 3)
+                {
+                    r10 = (uint)rcx;
+                    ip += 3;
+                }
+                else if (op == 0x41 && second == 0x83 && third == 0xE2 && left >= 4)
+                {
+                    r10 = (uint)r10 & (uint)(sbyte)code[ip + 3];
+                    below = false;
+                    equal = r10 == 0;
+                    ip += 4;
+                }
+                else if (op == 0x41 && second == 0x83 && third == 0xFA && left >= 4)
+                {
+                    var against = (uint)(sbyte)code[ip + 3];
+                    below = (uint)r10 < against;
+                    equal = (uint)r10 == against;
+                    ip += 4;
+                }
+                else if (op == 0xE9 && left >= 5)
+                {
+                    var to = (ulong)((long)(stubAt + (ulong)ip + 5) + BitConverter.ToInt32(code, ip + 1));
+                    return to == backTo ? null : $"the jump at {ip} goes to 0x{to:X}, not back";
+                }
+                else
+                {
+                    return $"byte 0x{op:X2} at {ip} is not an instruction the stub emits";
+                }
+            }
+
+            return "no jump back within 64 instructions";
+        }
+
+        static string? Stub8Board(byte[] code, ulong stubAt, ulong backTo, int builtFor, int width, int height,
+                                  byte[] terrain)
+        {
+            var frame = new byte[0x200];
+            for (var t = 0; t < width * height; t++)
+            {
+                if (Stub8Run(code, stubAt, backTo, frame, terrain[t]) is { } problem)
+                {
+                    return $"square {t}: {problem}";
+                }
+
+                BitConverter.GetBytes(BitConverter.ToInt32(frame, moveCountAt) + 1).CopyTo(frame, moveCountAt);
+            }
+
+            var count = BitConverter.ToInt32(frame, moveCountAt);
+            if (count is < 0 or > 64)
+            {
+                return $"the count ends at {count}";
+            }
+
+            if (builtFor != width)
+            {
+                return null;
+            }
+
+            if (count != 8 * height)
+            {
+                return $"the count ends at {count}, not {8 * height}";
+            }
+
+            for (var slot = 0; slot < 64; slot++)
+            {
+                var (x, y) = (slot % 8, slot / 8);
+                var expected = x < width && y < height ? terrain[x + width * y] : (byte)0;
+                if (frame[moveTableAt + slot] != expected)
+                {
+                    return $"place {slot} holds {frame[moveTableAt + slot]}, not {expected}";
+                }
+            }
+
+            return null;
+        }
+
+        var stub8Problems = new List<string>();
+        for (var builtFor = 1; builtFor <= 8; builtFor++)
+        {
+            var built = MoveBoundsStub8(stubProbe + 0x1C0, builtFor);
+            for (var width = 1; width <= 8; width++)
+            {
+                for (var height = 1; height <= 8; height++)
+                {
+                    var squares = width * height;
+                    var terrains = new List<byte[]>
+                    {
+                        new byte[squares],
+                        Enumerable.Repeat((byte)0xFF, squares).ToArray(),
+                        Enumerable.Repeat((byte)0xFD, squares).ToArray(),
+                    };
+                    for (var s = 0; s < squares; s++)
+                    {
+                        var one = new byte[squares];
+                        one[s] = 0xFE;
+                        terrains.Add(one);
+                    }
+
+                    foreach (var terrain in terrains)
+                    {
+                        if (Stub8Board(built, stubProbe + 0x1C0, _base + MoveBoundsSite8Back, builtFor, width, height,
+                                       terrain) is { } problem)
+                        {
+                            stub8Problems.Add($"built {builtFor} wide, board {width}x{height}: {problem}");
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (var problem in stub8Problems.Take(3))
+        {
+            Console.WriteLine($"  stub 8: {problem}");
+        }
+
+        Check("stub 8 at any width never writes past the 64-square table or lets the count pass 64, on any board " +
+              "up to 8x8 and any terrain, and still lays its own width out eight wide",
+              stub8Problems.Count == 0);
         Check("stub 8 touches r10 only, no stack, no game pointer",
               !Contains(stub8, [0x41, 0x52]) && !Contains(stub8, [0x41, 0x5A]) &&
               !Contains(stub8, [0x4D, 0x8B, 0x12]) && !Contains(stub8, [0x48, 0x8B]));
@@ -725,6 +1499,27 @@ internal static partial class Program
         Check("commit ring: a stock entry and a short read decode to no page",
               CommitPageFromJump(0x1000, CommitSites[0].Stock) == 0 &&
               CommitPageFromJump(0x1000, [0xE9, 0x00]) == 0);
+
+        var cursorStub = AiCursorStub(0x140E3F3B0, 0x140E41790);
+        Check("AI cursor: the stub saves rbx and a shadow space, runs the stock activate on the controller, then the light with the controller and 0, and returns",
+              cursorStub.Length == 43
+              && cursorStub.Take(10).SequenceEqual(new byte[] { 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0xB8 })
+              && BitConverter.ToUInt64(cursorStub, 10) == 0x140E3F3B0
+              && cursorStub.Skip(18).Take(9).SequenceEqual(new byte[] { 0xFF, 0xD0, 0x48, 0x8B, 0xCB, 0x33, 0xD2, 0x48, 0xB8 })
+              && BitConverter.ToUInt64(cursorStub, 27) == 0x140E41790
+              && cursorStub.Skip(35).SequenceEqual(new byte[] { 0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3 }));
+        Check("AI cursor: the stub sits after the four commit stubs and ends inside the page, and the slot is the AI vtable's third virtual",
+              CursorStubAt() == CommitStubsAt + CommitSites.Length * CommitStubStride
+              && CursorStubAt() >= CommitStubsAt + (CommitSites.Length - 1) * CommitStubStride + commitStubs.Max(c => c.Length)
+              && CursorStubAt() + cursorStub.Length <= 0x1000
+              && ActivateSlot == 0x10
+              && AiControllerVtableRva == ControllerVtables.Single(v => v.Name.StartsWith("AI")).Rva);
+        Check("AI cursor: the slot is put back only when it points outside the game; the stock is left, and a game pointer that is not the stock is another build's",
+              AiActivateVerdict(BitConverter.GetBytes(0x140E3F3B0UL), 0x140E3F3B0, 0x140000000, 0x149400000) == AiActivateState.Stock
+              && AiActivateVerdict(BitConverter.GetBytes(0x1A0000410UL), 0x140E3F3B0, 0x140000000, 0x149400000) == AiActivateState.Ours
+              && AiActivateVerdict(BitConverter.GetBytes(0x140E48F70UL), 0x140E3F3B0, 0x140000000, 0x149400000) == AiActivateState.Foreign
+              && AiActivateVerdict(null, 0x140E3F3B0, 0x140000000, 0x149400000) == AiActivateState.Unreadable
+              && AiActivateVerdict([0x01], 0x140E3F3B0, 0x140000000, 0x149400000) == AiActivateState.Unreadable);
 
         var probeRecord = new byte[CommitRecordSize];
         BitConverter.GetBytes(2u).CopyTo(probeRecord, 0x00);
@@ -848,13 +1643,185 @@ internal static partial class Program
               TurnedInPlace(spun, stood) && TurnedInPlace(stood, stood)
               && !TurnedInPlace(walked, stood) && !TurnedInPlace([], stood));
 
-        var sept30 = new DateOnly(2026, 9, 30);
-        Check("a test build's mark names the tester and never the date, and its expiry reads the same here as in the launcher",
-              TestBuild.Mark("Jane", sept30) == "private test build for Jane"
-              && TestBuild.Mark(null, null) is null
-              && !TestBuild.Expired(sept30, sept30) && TestBuild.Expired(sept30, sept30.AddDays(1))
-              && !TestBuild.Expired(null, sept30.AddYears(10))
-              && !TestBuild.ExpiredMessage().Contains(';') && !TestBuild.ExpiredMessage().Contains("2026"));
+        List<(int X, int Y, int Facing, int Hp)> pulledSpun = [(0, 0, 0, 3), (1, 2, 0, 4)];
+        List<(int X, int Y, int Facing, int Hp)> walkedTwo = [(0, 0, 0, 3), (1, 3, 2, 4)];
+        List<(int X, int Y, int Facing, int Hp)> bothMoved = [(0, 1, 0, 3), (1, 2, 2, 4)];
+        Check("one machine displaced by exactly one square is a shove or a pull, whatever its facing; two squares or two machines are not",
+              ShovedOneSquare(walked, stood) && ShovedOneSquare(pulledSpun, stood)
+              && !ShovedOneSquare(walkedTwo, stood) && !ShovedOneSquare(bothMoved, stood)
+              && !ShovedOneSquare(spun, stood) && !ShovedOneSquare([], stood)
+              && RecentDamage >= TimeSpan.FromSeconds(1));
+
+        List<(string What, ulong Addr, byte[] Bytes)> namesPlan = [("your corner", 0x1000, [0x41, 0x42, 0x00]), ("their corner", 0x2000, [0x43, 0x00])];
+        var namesMemory = new Dictionary<ulong, byte[]> { [0x1000] = [0x41, 0x42, 0x00], [0x2000] = [0x43, 0x00] };
+        var namesRebuilt = new Dictionary<ulong, byte[]> { [0x1000] = [0x41, 0x4C, 0x4F], [0x2000] = [0x43, 0x00] };
+        Check("the names hold rewrites when a written label no longer reads back, or cannot be read, and stays quiet while both hold",
+              !NamesNeedRewrite(namesPlan, a => namesMemory.GetValueOrDefault(a.Addr))
+              && NamesNeedRewrite(namesPlan, a => namesRebuilt.GetValueOrDefault(a.Addr))
+              && NamesNeedRewrite(namesPlan, a => null)
+              && NamesHeldLine.Contains("holding"));
+
+        Check("the names hold runs as the names hold, never as a second AI hold, and the AI hold still dispatches on its own flag",
+              !IsAiHold(["--set-names", "--me", "EXAMPLE", "--yes", NamesHoldFlag, "--parent-pid", "4242"])
+              && !IsAiHold(["--set-names", "--me", "EXAMPLE", "--yes", "--hold"])
+              && IsAiHold(["--hold", "--wait", "600", "--secs", "0", "--yes", "--parent-pid", "4242"])
+              && NamesHoldFlag != "--hold");
+
+        Check("the label search finds every match, overlapping ones and one at the very end, and nothing where there is none",
+              MatchesIn("AAAA"u8, "AA"u8.ToArray()).SequenceEqual([0, 1, 2])
+              && MatchesIn("xALOY\0ALOY\0"u8, "ALOY\0"u8.ToArray()).SequenceEqual([1, 6])
+              && MatchesIn("ALOx"u8, "ALOY\0"u8.ToArray()).Count == 0
+              && MatchesIn(""u8, "A"u8.ToArray()).Count == 0);
+
+        Check("the names are looked for in private read-write memory only, never in write-combined, image or mapped memory",
+              HeapRegion(0x20000, 0x04)
+              && !HeapRegion(0x20000, 0x404) && !HeapRegion(0x1000000, 0x04) && !HeapRegion(0x40000, 0x04)
+              && !HeapRegion(0x20000, 0x02));
+
+        List<(string What, ulong Addr, byte[] Bytes)> theirsOnly = [("their corner", 0x2000, [0x43, 0x00])];
+        Check("a corner the hold was asked to name and has not written counts as missing, so the hold keeps looking for it",
+              CornerMissing(theirsOnly, "EXAMPLE", "OTHER")
+              && !CornerMissing(namesPlan, "EXAMPLE", "OTHER")
+              && !CornerMissing(theirsOnly, null, "OTHER")
+              && CornerMissing([], null, "OTHER")
+              && !CornerMissing([], null, null));
+
+        Check("the hold looks again a second after a label is lost, then every 3 s, every 10 s after a minute, and every 30 s while all is well",
+              !NamesSweepDue(true, TimeSpan.FromSeconds(0.5), TimeSpan.FromMinutes(5))
+              && NamesSweepDue(true, TimeSpan.FromSeconds(1.5), TimeSpan.FromMinutes(5))
+              && !NamesSweepDue(true, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(2))
+              && NamesSweepDue(true, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(3))
+              && !NamesSweepDue(true, TimeSpan.FromSeconds(90), TimeSpan.FromSeconds(5))
+              && NamesSweepDue(true, TimeSpan.FromSeconds(90), TimeSpan.FromSeconds(10))
+              && !NamesSweepDue(false, TimeSpan.Zero, TimeSpan.FromSeconds(29))
+              && NamesSweepDue(false, TimeSpan.Zero, TimeSpan.FromSeconds(30)));
+
+        Check("D-291: every sweep of the names hold is logged with how long it read the game's memory and what it found",
+              NamesSweepLine(TimeSpan.FromMilliseconds(612), 0)
+                  == "  names hold swept the game's memory in 612 ms, nothing to write"
+              && NamesSweepLine(TimeSpan.FromMilliseconds(640.7), 2)
+                  == "  names hold swept the game's memory in 640 ms, 2 to write");
+
+        Check("at match entry the names wait for both corners to exist, and write what there is after 20 s",
+              NamesEntryDone(namesPlan, "EXAMPLE", "OTHER", TimeSpan.Zero)
+              && !NamesEntryDone(theirsOnly, "EXAMPLE", "OTHER", TimeSpan.FromSeconds(5))
+              && !NamesEntryDone([], "EXAMPLE", "OTHER", TimeSpan.FromSeconds(19))
+              && NamesEntryDone(theirsOnly, "EXAMPLE", "OTHER", TimeSpan.FromSeconds(20)));
+
+        List<(string What, ulong Addr, byte[] Bytes)> sweepFound = [("your corner", 0x3000, [0x41, 0x42, 0x00]), ("their corner", 0x2000, [0x43, 0x00])];
+        var (namesMerged, namesFresh) = MergeNames(theirsOnly, sweepFound);
+        var (_, nothingNew) = MergeNames(namesMerged, sweepFound);
+        Check("a sweep writes only the labels it has not written already, and the hold keeps every label it holds",
+              namesFresh.Count == 1 && namesFresh[0].Addr == 0x3000
+              && namesMerged.Count == 2 && namesMerged.Any(e => e.Addr == 0x2000) && namesMerged.Any(e => e.Addr == 0x3000)
+              && nothingNew.Count == 0);
+
+        Check("a name is written only where the game's own label still reads at the moment of writing, and its length only with it",
+              StillStock("ALOY\0"u8.ToArray(), StockAt("your corner"), labelLeftAlone: false)
+              && !StillStock("AL\0Y\0"u8.ToArray(), StockAt("your corner"), labelLeftAlone: false)
+              && !StillStock(null, StockAt("their corner"), labelLeftAlone: false)
+              && StillStock(BitConverter.GetBytes(8u), StockAt("their corner length"), labelLeftAlone: false)
+              && !StillStock(BitConverter.GetBytes(8u), StockAt("their corner length"), labelLeftAlone: true)
+              && !StillStock("ALOY\0"u8.ToArray(), StockAt("a label this build does not know"), labelLeftAlone: false));
+
+        Check("the set screen's label is written only until the match is first seen live, never after its restore",
+              SetLabelTicks(DateTime.MinValue) && !SetLabelTicks(DateTime.UtcNow));
+
+        var setShort = SetLabelBytes("Halt Hunter", 47, StockSetLabel.Length);
+        Check("the army name goes into the set label with its terminator and the tag, and clears what the stock text and an old tag left",
+              setShort.TextLength == 11 && setShort.Tagged && !setShort.Cut
+              && setShort.Bytes.Length == StockSetLabel.Length + 1 + SetLabelTag.Length
+              && setShort.Bytes.AsSpan(0, 12).SequenceEqual("Halt Hunter\0"u8)
+              && setShort.Bytes.AsSpan(12, 8).SequenceEqual(SetLabelTag)
+              && setShort.Bytes.AsSpan(20).IndexOfAnyExcept((byte)0) < 0);
+
+        var accented = new string('\u00E9', 24);
+        var setLong = SetLabelBytes(accented, 47, StockSetLabel.Length);
+        var setNarrow = SetLabelBytes("Halt Hunter", 15, StockSetLabel.Length);
+        Check("a name too long for the room drops the tag and is cut at a whole character, and a narrow block takes the name without the tag",
+              !setLong.Tagged && setLong.Cut && setLong.TextLength == 46 && setLong.Bytes[46] == 0
+              && System.Text.Encoding.UTF8.GetString(setLong.Bytes, 0, 46) == new string('\u00E9', 23)
+              && setLong.Bytes.Length <= 48
+              && !setNarrow.Tagged && !setNarrow.Cut && setNarrow.TextLength == 11 && setNarrow.Bytes.Length <= 16);
+
+        byte[] SetWindow(uint refcount, uint length, string text)
+        {
+            var window = new byte[TagLookBehind];
+            var start = TagLookBehind - text.Length;
+            BitConverter.GetBytes(refcount).CopyTo(window, start - 16);
+            BitConverter.GetBytes(0xFFFFFFFFu).CopyTo(window, start - 12);
+            BitConverter.GetBytes(length).CopyTo(window, start - 8);
+            BitConverter.GetBytes(0x3Fu).CopyTo(window, start - 4);
+            System.Text.Encoding.ASCII.GetBytes(text).CopyTo(window, start);
+            return window;
+        }
+
+        Check("a tagged label is traced back to its text by the header whose length matches, and a freed or mismatched one is not",
+              TaggedTextLength(SetWindow(1, 11, "Halt Hunter")) == 11
+              && TaggedTextLength(SetWindow(1, 10, "Halt Hunter")) is null
+              && TaggedTextLength(SetWindow(0, 11, "Halt Hunter")) is null);
+
+        var liveSet = Convert.FromHexString("01000000FFFFFFFF0E0000003F000000");
+        Check("the set label is written only while its block is live: a released block, an interned copy or a wrong length is left alone",
+              LiveLabelHeader(liveSet, 14)
+              && !LiveLabelHeader(Convert.FromHexString("00000000FFFFFFFF0E0000003F000000"), 14)
+              && !LiveLabelHeader(Convert.FromHexString("0100008012345678" + "0E0000000E000000"), 14)
+              && !LiveLabelHeader(liveSet, 11)
+              && !LiveLabelHeader(null, 14));
+
+        var runDrawn = new byte[TextRunFontSize + 4];
+        BitConverter.GetBytes(1.0f).CopyTo(runDrawn, 12);
+        BitConverter.GetBytes(21.0f).CopyTo(runDrawn, TextRunFontSize);
+        var runNot = new byte[TextRunFontSize + 4];
+        List<SetLabelSpot> setSpots = [new(0x5000, 14, 15), new(0x6000, 14, 47)];
+        var setDrawn = MarkDrawn(setSpots, [[0x7030], [0x8030]], run => run == 0x8000 ? runDrawn : runNot);
+        Check("only a copy a text run points at is the label on screen; a copy other objects point at, or nothing does, is its source",
+              setDrawn.Count == 2 && !setDrawn[0].Drawn && setDrawn[1].Drawn && setDrawn[1].Text == 0x6000
+              && MarkDrawn(setSpots, [[], []], _ => runDrawn).All(s => !s.Drawn)
+              && LooksLikeTextRun(runDrawn) && !LooksLikeTextRun(runNot));
+
+        Check("the source is searched the moment its references move, the label every 10 s while only the source is held, and on the names cadence otherwise",
+              SetLabelSweepDue(false, TimeSpan.Zero, TimeSpan.FromSeconds(0.5), sourceMoved: true, labelMissing: false)
+              && !SetLabelSweepDue(false, TimeSpan.Zero, TimeSpan.FromSeconds(9), sourceMoved: false, labelMissing: true)
+              && SetLabelSweepDue(false, TimeSpan.Zero, TimeSpan.FromSeconds(10), sourceMoved: false, labelMissing: true)
+              && !SetLabelSweepDue(false, TimeSpan.Zero, TimeSpan.FromSeconds(29), sourceMoved: false, labelMissing: false)
+              && SetLabelSweepDue(false, TimeSpan.Zero, TimeSpan.FromSeconds(30), sourceMoved: false, labelMissing: false)
+              && SetLabelSweepDue(true, TimeSpan.FromSeconds(1.5), TimeSpan.FromMinutes(5), sourceMoved: false, labelMissing: true));
+
+        Dictionary<ulong, uint> sourceSeen = new() { [0x9000] = 1 };
+        Check("the source's references moving is a change in its refcount, and an unreadable one is not",
+              SourceRefsMoved(sourceSeen, _ => 3u)
+              && !SourceRefsMoved(sourceSeen, _ => 1u)
+              && !SourceRefsMoved(sourceSeen, _ => null)
+              && !SourceRefsMoved(new Dictionary<ulong, uint>(), _ => 3u));
+
+        Check("the source's text is searched as the UTF-8 bytes that were written, with the terminator",
+              TerminatedUtf8("Tow test").SequenceEqual("Tow test\0"u8.ToArray())
+              && TerminatedUtf8("Café").Length == 6 && TerminatedUtf8("Café")[5] == 0);
+
+        Check("the set label goes back to the game's text over the whole length that was written",
+              SetLabelRestoreBytes(20).Length == 20
+              && SetLabelRestoreBytes(20).AsSpan(0, 15).SequenceEqual("Beginner's Set\0"u8)
+              && SetLabelRestoreBytes(20).AsSpan(15).IndexOfAnyExcept((byte)0) < 0
+              && SetLabelRestoreBytes(4).Length == 15);
+
+        Check("an army name loses control characters and outer spaces, stops at 32 characters, and an empty one writes nothing",
+              CleanArmyName(" Halt\tHunter\n ") == "HaltHunter"
+              && CleanArmyName(new string('a', 40))!.Length == MaxArmyNameChars
+              && CleanArmyName(" \t ") is null && CleanArmyName(null) is null
+              && CleanArmyName("Caf\u00E9 Gr\u00F6\u00DFe") == "Caf\u00E9 Gr\u00F6\u00DFe");
+
+        Check("the army name arrives as hex from netplay, a name shaped like a flag stays a name, and bad hex writes nothing",
+              ArmyNameArg(["--set-names", ArmyNameHexFlag, "48616C742048756E746572"]) == "Halt Hunter"
+              && ArmyNameArg(["--set-names", ArmyNameHexFlag, "2D2D686967686C69676874"]) == "--highlight"
+              && ArmyNameArg(["--set-names", ArmyNameHexFlag, "4G"]) is null
+              && ArmyNameArg(["--set-names", ArmyNameHexFlag, "486"]) is null
+              && ArmyNameArg(["--set-names", "--army-name", "Plain Steel"]) == "Plain Steel"
+              && ArmyNameArg(["--set-names", "--me", "EXAMPLE"]) is null
+              && ArmyNameHexFlag == "--army-name-hex");
+
+        Check("--army-name rides the names hold's own arguments, so it never dispatches as the AI hold",
+              !IsAiHold(["--set-names", "--army-name", "Halt Hunter", "--yes", NamesHoldFlag, "--parent-pid", "4242"]));
 
         var home = @"C:\Games\Strikers\";
         var ownExe = home + "live-probe.exe";
@@ -890,14 +1857,6 @@ internal static partial class Program
               && MoveBoundsState([true, false]) == MoveBoundsMixed);
         Check("the held line carries the word netplay waits for",
               MoveBoundsHeldLine.Contains("holding"));
-        Check("a restore verb runs on an expired build and a write does not",
-              TestBuild.RestoreVerb(["--patch-move-bounds", "--clear"])
-              && TestBuild.RestoreVerb(["--force-first", "clear", "--yes"])
-              && TestBuild.RestoreVerb(["--freeze"])
-              && !TestBuild.RestoreVerb(["--patch-move-bounds", "--yes"])
-              && !TestBuild.RestoreVerb(["--set-units", "--yes"])
-              && !TestBuild.RestoreVerb(["--set-units", "--yes", "--patch-move-bounds", "--clear"])
-              && !TestBuild.RestoreVerb(["--force-first", "clear", "--patch-move-bounds", "--yes"]));
         Check("the placing rows must fit the board",
               PlacingRowsProblem(2, 8) is null && PlacingRowsProblem(8, 8) is null
               && PlacingRowsProblem(9, 8) is not null && PlacingRowsProblem(0, 8) is not null);
@@ -985,14 +1944,6 @@ internal static partial class Program
               && SiteClearVerdict(true, [0x90, 0x90, 0x90, 0x90, 0x90], stockRun, siteAt, imageStart, imageEnd) == SiteFound.Foreign
               && SiteClearVerdict(false, new byte[5], stockRun, siteAt, imageStart, imageEnd) == SiteFound.Unreadable);
 
-        Check("the expiry gate's restore list is an allowlist, and the ring's clear is on it",
-              TestBuild.RestoreVerb(["--commit-ring", "--clear"])
-              && !TestBuild.RestoreVerb(["--commit-ring", "--yes"])
-              && !TestBuild.RestoreVerb(["--restore-reject", "--commit-ring", "--yes"])
-              && !TestBuild.RestoreVerb(["--restore-reject", "--unlock-challenges"])
-              && !TestBuild.RestoreVerb(["--restore-reject", "--first", "human"])
-              && TestBuild.RestoreVerb(["--freeze", "--parent-pid", "42"])
-              && !TestBuild.RestoreVerb(["--freeze", "--parent-pid", "--commit-ring"]));
 
         bool Survives(Func<bool> test)
         {
@@ -1268,6 +2219,74 @@ internal static partial class Program
               ReleaseLost(released: true, 1e9f) && !ReleaseLost(released: true, 0.5f)
               && !ReleaseLost(released: false, 1e9f));
 
+        const string board = "0B7E1F3C5A9D42E8B16C4F7A2D8E90B3";
+        string[][] writePaths =
+        [
+            ["--patch-move-bounds", "--clear"],
+            ["--patch-move-bounds", "--yes", "--parent-pid", "4242"],
+            ["--patch-reject", "--yes"],
+            ["--restore-reject", "--yes"],
+            ["--force-first", "clear", "--yes"],
+            ["--force-first", "host", "--yes", "--wait", "600", "--parent-pid", "4242"],
+            ["--first", "0"],
+            ["--freeze"],
+            ["--freeze", "--clear"],
+            ["--commit-ring", "--clear"],
+            ["--commit-ring", "--yes", "--parent-pid", "4242"],
+            ["--commit-log"],
+            ["--hold", "--wait", "600", "--secs", "0", "--yes", "--parent-pid", "4242"],
+            ["--hold-placement", "--wait", "600", "--parent-pid", "4242"],
+            ["--set-names", "--me", "EXAMPLE", "--yes", NamesHoldFlag, "--wait", "600", "--parent-pid", "4242"],
+            ["--set-names", "--army-name-hex", "41", "--yes", NamesHoldFlag, "--parent-pid", "4242"],
+            ["--set-units", "--allocate", "--board-game", board, "--human", board, "--ai", board, "--yes"],
+            ["--set-units", "--board-game", board, "--human", board, "--ai", board, "--yes"],
+            ["--set-rules", "--board-game", board, "--victory-points", "7", "--yes"],
+            ["--set-board-size", "--board-game", board, "--rows", "6", "--cols", "6", "--yes"],
+            ["--set-board", "0", "1", "--board-game", board, "--yes"],
+            ["--set-placement", "1", "6", "0", "--yes"],
+            ["--place-one", "0", "1", "6", "0", "--yes"],
+            ["--game-alloc", "64"],
+            ["--script-turn", "a", "1", "6", "--yes"],
+            ["--script-move", "1", "6", "1", "5", "--yes"],
+            ["--script-pass", "--yes"],
+            ["--inject-move", "1", "6", "1", "5"],
+            ["--poke", "0x10000", "00", "--yes"],
+            ["--unlock-challenges", "--yes"],
+            ["--highlight"],
+        ];
+        string[][] readPaths =
+        [
+            ["--snapshot"],
+            ["--watch-snapshot", "600", "--parent-pid", "4242"],
+            ["--match-live"],
+            ["--first", "read"],
+            ["--board-shape", "--board-game", board],
+            ["--challenges"],
+            ["--survey"],
+            ["--probe"],
+        ];
+        const string unknownBuild = "667B1778-949F000";
+        Check("every write refuses on a game build this live-probe does not know and runs on the one it knows, " +
+              "and the reads run on both",
+              writePaths.All(a => UnknownBuildRefusal(a, unknownBuild) is not null
+                                  && UnknownBuildRefusal(a, KnownBuilds[0]) is null)
+              && readPaths.All(a => UnknownBuildRefusal(a, unknownBuild) is null
+                                 && (HandleAccess(a) & WriteAccess) == 0)
+              && UnknownBuildRefusal(writePaths[0], BuildText(0, 0x949F000)) is not null
+              && writePaths.All(a => UnknownBuildRefusal(a, BuildText(0x667B1777, 0x949F000)) is null)
+              && KnownBuilds.All(KnownBuild)
+              && UnknownBuildLine(unknownBuild).StartsWith("REFUSED: game build not supported: ", StringComparison.Ordinal)
+              && UnknownBuildLine(unknownBuild).Contains(unknownBuild));
+
+        var gameBase = 0x7FF740D90000UL;
+        Check("the halt's freeze writes only into a match whose challenge is a board game one",
+              FreezeTarget(0x20000, gameBase + BoardGameChallengeRva, gameBase) == 0x20000 + PauseFlags
+              && FreezeTarget(0x20000, gameBase + 0x1911840, gameBase) == 0
+              && FreezeTarget(0x20000, gameBase + 0x190FCB8, gameBase) == 0
+              && FreezeTarget(0x20000, gameBase + 0x1900000, gameBase) == 0
+              && FreezeTarget(0x20000, 0, gameBase) == 0
+              && FreezeTarget(0, gameBase + BoardGameChallengeRva, gameBase) == 0);
+
         static List<GuardVerdict> GuardSequence((bool InstSane, bool PlacingLive)[] polls)
         {
             var verdicts = new List<GuardVerdict>();
@@ -1314,9 +2333,67 @@ internal static partial class Program
         return map;
     }
 
+    private static Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)> MachineNumbers(ulong logic)
+    {
+        var map = new Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)>();
+
+        var count = (int)ReadU32(logic + 0x38);
+        var array = ReadPtr(logic + 0x40);
+        for (var i = 0; i < count && i < 64; i++)
+        {
+            var u = ReadPtr(array + (ulong)(i * 8));
+            if (!Sane(u))
+            {
+                continue;
+            }
+
+            var packed = ReadByte(u + 0x38);
+            var pattern = PatternOf(u);
+            var (skill, range) = SkillAndRange(u);
+            map[(Nibble(packed), Nibble(packed >> 4))] = (pattern, skill, range);
+        }
+        return map;
+    }
+
+    private static List<string> TurnReachProblems(List<Act> acts,
+                                                  Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)> machines)
+    {
+        var at = new Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)>(machines);
+        var problems = new List<string>();
+
+        for (var i = 0; i < acts.Count; i++)
+        {
+            var a = acts[i];
+            if (!at.TryGetValue((a.SrcX, a.SrcY), out var machine))
+            {
+                machine = (-1, -1, -1);
+            }
+
+            var (walkX, walkY) = StandSquare(a);
+
+            if (a.Attack && i > 0)
+            {
+                var problem = ReachProblem(machine.Pattern, machine.Skill, machine.Range,
+                                           walkX, walkY, a.Facing, a.DstX, a.DstY);
+                if (problem is not null)
+                {
+                    problems.Add($"action {i + 1}: {problem}");
+                }
+            }
+
+            var land = a.Attack ? ChargeLanding(machine.Pattern, machine.Range, walkX, walkY, a.Facing) : null;
+            at.Remove((a.SrcX, a.SrcY));
+            at[land ?? (walkX, walkY)] = machine;
+        }
+
+        return problems;
+    }
+
     private static bool SimulateTurn(ulong logic, ulong inst, int seat, List<Act> acts)
     {
         var at = Occupancy(logic, inst, seat);
+        var numbers = MachineNumbers(logic);
+        var numbersAt = new Dictionary<(int X, int Y), (int Pattern, int Skill, int Range)>(numbers);
         var exact = true;
         var ok = true;
 
@@ -1335,21 +2412,9 @@ internal static partial class Program
                     ? $"action {i + 1} activates ({a.SrcX},{a.SrcY}), where nothing will be standing"
                     : $"action {i + 1} activates ({a.SrcX},{a.SrcY}), held by the {who}";
 
-                if (exact)
-                {
-                    Console.Error.WriteLine($"\n  Warning: {complaint}.");
-                    Console.Error.WriteLine("  The game does not refuse that. It consumes the activate, activates nothing,");
-                    Console.Error.WriteLine("  and then the next record stops the turn dead, move and attack only run");
-                    Console.Error.WriteLine("  while controller+0x320 is set, and they pop from inside that test. The rest");
-                    Console.Error.WriteLine("  of the turn never happens and nothing reports it. --force arms it anyway.");
-                    ok = false;
-                }
-                else
-                {
-                    Console.WriteLine($"\n  Warning: {complaint}, as far as this can tell.");
-                    Console.WriteLine("  An earlier action was an attack, which moves pieces this cannot predict, so");
-                    Console.WriteLine("  this is a warning rather than a refusal.");
-                }
+                Console.WriteLine($"\n  Warning: {complaint}" + (exact ? "." : ", as far as this can tell."));
+                Console.WriteLine("  The live board check reads the real board when that action comes and refuses");
+                Console.WriteLine("  it there, with the actions before it already applied.");
             }
 
             var (dx, dy) = StandSquare(a);
@@ -1362,12 +2427,54 @@ internal static partial class Program
                 ok = false;
             }
 
+            if (!numbersAt.TryGetValue((a.SrcX, a.SrcY), out var machine))
+            {
+                machine = (-1, -1, -1);
+            }
+
+            var land = a.Attack ? ChargeLanding(machine.Pattern, machine.Range, dx, dy, a.Facing) : null;
+            if (land is { } l && i > 0)
+            {
+                var occupied = at.ContainsKey(l) && l != (a.SrcX, a.SrcY);
+                var landProblem = LandingProblem(l, width, height, occupied);
+                if (landProblem is not null && !occupied)
+                {
+                    Console.Error.WriteLine($"\n  Warning: action {i + 1}: {landProblem}.");
+                    Console.Error.WriteLine("  The game performs the charge itself and needs its landing on the board and empty.");
+                    ok = false;
+                }
+                else if (landProblem is not null)
+                {
+                    Console.WriteLine($"\n  Warning: action {i + 1}: {landProblem}" +
+                                      (exact ? "." : ", as far as this can tell."));
+                    Console.WriteLine("  The live board check refuses it when that action comes, if it is still so.");
+                }
+            }
+
+            var ends = land ?? (dx, dy);
             at.Remove((a.SrcX, a.SrcY));
-            at[(dx, dy)] = "AI";
+            at[ends] = "AI";
+            numbersAt.Remove((a.SrcX, a.SrcY));
+            numbersAt[ends] = machine;
             if (a.Attack)
             {
                 exact = false;
             }
+        }
+
+        var reach = TurnReachProblems(acts, numbers);
+        foreach (var problem in reach)
+        {
+            Console.Error.WriteLine($"\n  Warning: {problem}.");
+        }
+
+        if (reach.Count > 0)
+        {
+            Console.Error.WriteLine("  The stand square and facing do not reach the victim, so the game would strike");
+            Console.Error.WriteLine("  something else. Where a machine stands, where it faces and where its victim is");
+            Console.Error.WriteLine("  hold whatever moved before them, so this is refused for every action, not only");
+            Console.Error.WriteLine("  the first.");
+            ok = false;
         }
 
         return ok;
@@ -1403,9 +2510,9 @@ internal static partial class Program
                                             (who is null ? "NOTHING." : $"a piece of the {who}."));
                     if (who != "AI")
                     {
-                        Console.Error.WriteLine("  Key: That is the known cause: an activate that finds no machine of " +
-                                                "ours is consumed\n     anyway, activates nothing, and the move or " +
-                                                "attack behind it then returns without\n     consuming itself. " +
+                        Console.Error.WriteLine("  That is the known cause: an activate that finds no machine of " +
+                                                "ours is consumed\n  anyway, activates nothing, and the move or " +
+                                                "attack behind it then returns without\n  consuming itself. " +
                                                 "controller+0x348 stays set and nothing dispatches again.");
                     }
                 }

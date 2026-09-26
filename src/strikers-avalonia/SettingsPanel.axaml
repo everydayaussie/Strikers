@@ -29,13 +29,13 @@
           <WrapPanel Name="ToolRow" Orientation="Horizontal" Margin="0,0,0,-6">
             <Button Name="LogFolderButton" Classes="glass tool" Content="Open Strikers folder"
                     Margin="0,0,8,6" />
-            <Button Name="ReportButton" Classes="glass tool" Content="Save report"
+            <Button Name="ReportButton" Classes="glass tool" Content="Send report"
                     Margin="0,0,8,6" />
             <Button Name="UnlockButton" Classes="glass tool" Content="Unlock challenges"
                     Margin="0,0,8,6" />
-            <Button Name="RandomBoardButton" Classes="glass tool" Content="Random board"
+            <Button Name="RandomBoardButton" Classes="glass tool" Content="Add built-in board"
                     Margin="0,0,8,6" />
-            <Button Name="RandomArmyButton" Classes="glass tool" Content="Random army"
+            <Button Name="RandomArmyButton" Classes="glass tool" Content="Add built-in army"
                     Margin="0,0,8,6" />
             <Button Name="BackdropButton" Classes="glass tool" Content="Download pictures"
                     Margin="0,0,8,6" IsVisible="False" />

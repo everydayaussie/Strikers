@@ -285,7 +285,7 @@ public sealed class Settings
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            return Play.WithoutPath($"could not write {path}: {e.Message}", path);
+            return Play.WithoutPath($"Could not save {path}. {e.Message}", path);
         }
     }
 
@@ -415,11 +415,13 @@ public static class ArmyStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            return Play.WithoutPath($"could not write {path}: {e.Message}", path);
+            return Play.WithoutPath($"Could not save {path}. {e.Message}", path);
         }
     }
 
     public const int MaxArmies = 32;
+
+    public const string ShelfFull = "The army list is full. Delete an army first.";
 
     public static bool HasRoom(int saved, bool replacing)
     {
@@ -449,7 +451,7 @@ public static class ArmyStore
         var replacing = all.RemoveAll(a => string.Equals(a.Name, army.Name, StringComparison.OrdinalIgnoreCase)) > 0;
         if (!HasRoom(all.Count, replacing))
         {
-            return $"{MaxArmies} saved armies is the limit. Delete one to save another.";
+            return ShelfFull;
         }
 
         all.Add(army);

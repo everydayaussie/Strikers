@@ -69,24 +69,20 @@ public partial class SettingsPanel : UserControl
         randomArmy.Click += (_, _) => RandomArmy();
 
         ToolTip.SetTip(unlock,
-                       "Close Salma's challenge list before pressing this, then open it again. The "
-                       + "unlock is written into the running game, and the list only re-reads it when "
-                       + "it is opened. It is memory only, so it is gone when the game restarts.");
+                       "Unlocks every Machine Strike challenge until the game closes. Close Salma's "
+                       + "challenge list first, then open it again.");
         ToolTip.SetTip(randomBoard,
-                       $"Saves one of the {Library.Boards.Count} built-in boards to the Boards shelf, "
-                       + "one the shelf does not already hold. They run from plain fields to boards "
-                       + "that exist to be broken.");
+                       $"Adds one of the {Library.Boards.Count} built-in boards that is not in Saved boards yet.");
         ToolTip.SetTip(randomArmy,
-                       $"Saves one of the {Library.Armies.Count} built-in armies to the Armies shelf, "
-                       + "one the shelf does not already hold. Most cost more than the stock 10 "
-                       + "points. The max army cost on the Play panel is what lets those play.");
+                       $"Adds one of the {Library.Armies.Count} built-in armies that is not in Saved armies yet. "
+                       + "Most cost more than 10, so raise Max army cost to play them.");
     }
 
     private void UnlockChallenges()
     {
         if (NetplayTool.LiveProbe() is not { } probe)
         {
-            ToastRail.Show(ToastKind.Bad, "live-probe.exe is not beside the launcher.");
+            ToastRail.Show(ToastKind.Bad, "live-probe.exe is missing from the Strikers folder.");
             return;
         }
 
@@ -105,11 +101,16 @@ public partial class SettingsPanel : UserControl
                 switch (Play.ReadUnlock(output))
                 {
                     case Play.UnlockOutcome.Cleared:
-                        ToastRail.Show(ToastKind.Good, "Unlocked challenges. Re-open the challenge list to see it.");
+                        ToastRail.Show(ToastKind.Good, "Challenges unlocked. Reopen the challenge list to see them.");
                         break;
 
                     case Play.UnlockOutcome.AlreadyClear:
                         ToastRail.Show(ToastKind.Info, "Every challenge is already unlocked.");
+                        break;
+
+                    case Play.UnlockOutcome.GameUpdated:
+                        var (updated, needs) = Release.GameUpdatedText(UpdateCheck.Ours(), UpdateCheck.Newest);
+                        ToastRail.Show(ToastKind.Bad, $"{updated}. {needs}");
                         break;
 
                     default:
@@ -131,7 +132,7 @@ public partial class SettingsPanel : UserControl
 
         if (!BoardStore.HasRoom(all.Count))
         {
-            ToastRail.Show(ToastKind.Bad, $"{BoardStore.MaxBoards} saved boards is the limit. Delete one to add another.");
+            ToastRail.Show(ToastKind.Bad, BoardStore.ShelfFull);
             return;
         }
 
@@ -159,7 +160,7 @@ public partial class SettingsPanel : UserControl
         var existing = ArmyStore.ReadAll();
         if (!ArmyStore.HasRoom(existing.Count, replacing: false))
         {
-            ToastRail.Show(ToastKind.Bad, $"{ArmyStore.MaxArmies} saved armies is the limit. Delete one to add another.");
+            ToastRail.Show(ToastKind.Bad, ArmyStore.ShelfFull);
             return;
         }
 
@@ -179,10 +180,10 @@ public partial class SettingsPanel : UserControl
             Dispatcher.UIThread.Post(() =>
             {
                 button.IsEnabled = true;
-                button.Content = "Random army";
+                button.Content = "Add built-in army";
                 if (roster.Count == 0)
                 {
-                    ToastRail.Show(ToastKind.Bad, "Could not reach netplay, so no machines to build from.");
+                    ToastRail.Show(ToastKind.Bad, "netplay.exe did not answer. It should be in the Strikers folder.");
                     return;
                 }
 
@@ -303,9 +304,7 @@ public partial class SettingsPanel : UserControl
             }
         };
 
-        ToolTip.SetTip(button,
-                       $"Opens the folder beside Strikers.exe: {MatchLog.Name}, the record of every "
-                       + $"match, the {Report.RecordingsFolder} netplay keeps, and the {Report.Folder}.");
+        ToolTip.SetTip(button, "Opens the folder that holds your reports and your log.");
     }
 
     private void WireReport()
@@ -313,21 +312,32 @@ public partial class SettingsPanel : UserControl
         var button = this.FindControl<Button>("ReportButton")!;
         button.Click += (_, _) =>
         {
-            var zip = Report.TrySave(AppContext.BaseDirectory, DateTime.Now, out var problem);
-            if (zip is not null)
+            var zip = Report.TrySave(AppContext.BaseDirectory, DateTime.Now, out var problem,
+                                     Identity.Facts("saved from Settings", null));
+            if (zip is null && problem == Report.NothingToReport)
             {
-                ToastRail.Show(ToastKind.Good,
-                               $"Saved {Report.Folder}\\{System.IO.Path.GetFileName(zip)} beside Strikers.");
+                ToastRail.Show(ToastKind.Info, "Nothing to report yet. Play a match first.");
                 return;
             }
 
-            ToastRail.Show(ToastKind.Info, $"No report saved: {problem}.");
+            var owner = TopLevel.GetTopLevel(this)?.TryGetPlatformHandle()?.Handle ?? 0;
+            var opened = Identity.SendReport(zip, owner, null);
+            if (opened is not null)
+            {
+                ToastRail.Show(ToastKind.Bad, opened);
+                return;
+            }
+
+            if (zip is null)
+            {
+                ToastRail.Show(ToastKind.Bad, $"The report could not be saved. Attach {MatchLog.Name} instead.");
+                return;
+            }
+
+            ToastRail.Show(ToastKind.Info, Identity.SendHint);
         };
 
-        ToolTip.SetTip(button,
-                       $"Zips {MatchLog.Name}, its rolled predecessor and the newest match recording "
-                       + $"into the {Report.Folder} folder beside Strikers.exe. Send that one file when "
-                       + "asking for help. A halted match saves one by itself.");
+        ToolTip.SetTip(button, "Saves a report of your last match and opens the page to send it on.");
     }
 
     private void SizeNameBox()
@@ -414,34 +424,28 @@ public partial class SettingsPanel : UserControl
 
             var rows = new List<(string Label, string Value)>
             {
-                ("version", UpdateCheck.Ours() ?? "not set"),
+                ("Version", UpdateCheck.Ours() ?? "not set"),
             };
 
             if (Release.Commit(me) is { } commit)
             {
-                rows.Add(("commit", commit));
+                rows.Add(("Commit", commit));
             }
 
             if (UpdateCheck.Newest is { } newest)
             {
-                rows.Add(("newest on Nexus", newest));
+                rows.Add(("Newest version", newest));
             }
 
             rows.AddRange(new List<(string Label, string Value)>
             {
                 (label, $"{mvid:N}"),
-                ("netplay", NetplayTool.WithoutName("netplay", Ask(NetplayTool.Netplay(), "--version"))),
-                ("live-probe", NetplayTool.WithoutName("live-probe", Ask(NetplayTool.LiveProbe(), "--version"))),
+                ("netplay", NetplayTool.WithoutName("netplay", Identity.Ask(NetplayTool.Netplay(), "--version"))),
+                ("live-probe", NetplayTool.WithoutName("live-probe", Identity.Ask(NetplayTool.LiveProbe(), "--version"))),
             });
 
-            var build = Ask(NetplayTool.LiveProbe(), "--build");
-            rows.Add(("game build", build is null or "" ? "the game is not running" : build));
-
-            var (testFor, testExpires) = TestBuild.Read(me);
-            if (TestBuild.Mark(testFor, testExpires) is { } testMark)
-            {
-                rows.Add(("test build", testMark));
-            }
+            var build = Identity.Ask(NetplayTool.LiveProbe(), "--build");
+            rows.Add(("Game build", build is null or "" ? "the game is not running" : build));
 
             Dispatcher.UIThread.Post(() =>
             {
@@ -499,23 +503,5 @@ public partial class SettingsPanel : UserControl
         }
 
         versionsText = string.Join('\n', lines);
-    }
-
-    private static string? Ask(string? exe, string arg)
-    {
-        if (exe is null || !File.Exists(exe))
-        {
-            return null;
-        }
-
-        var text = NetplayTool.Run(exe, [arg], timeoutMs: 20000);
-        if (text is null)
-        {
-            return null;
-        }
-
-        return text.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                   .Select(l => l.Trim())
-                   .FirstOrDefault(l => l.Length > 0);
     }
 }

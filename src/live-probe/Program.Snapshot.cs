@@ -498,9 +498,11 @@ internal static partial class Program
 
     private const ulong ChallengeManagerOffset = 0x190;
 
+    private const ulong BoardGameChallengeRva = 0x190F750;
+
     private static readonly (string Name, ulong Rva)[] ChallengeTypes =
     {
-        ("BoardGame", 0x190F750), ("FightingPit", 0x1911840),
+        ("BoardGame", BoardGameChallengeRva), ("FightingPit", 0x1911840),
         ("CombatArena", 0x190FCB8), ("HuntingGround", 0x19115E0),
     };
 

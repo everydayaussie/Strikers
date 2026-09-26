@@ -74,8 +74,8 @@
               <ComboBoxItem Content="Opponent" />
               <ComboBoxItem Content="Random" />
             </ComboBox>
-            <Button Name="CreateLobbyButton" Grid.Column="2" Classes="glass action primary"
-                    Content="Create lobby" MinWidth="0" HorizontalAlignment="Right"
+            <Button Name="CreateInviteButton" Grid.Column="2" Classes="glass action primary"
+                    Content="Create invite" MinWidth="0" HorizontalAlignment="Right"
                     VerticalAlignment="Center" />
           </Grid>
 
@@ -99,7 +99,11 @@
 
         <StackPanel Name="HostInvitePage" Spacing="6" IsVisible="False">
           <Border Classes="shelfHeader" Margin="0,2,0,4">
-            <TextBlock Name="ShareLabel" Classes="sectionHeading" Text="Invite" />
+            <Grid ColumnDefinitions="Auto,*">
+              <TextBlock Name="ShareLabel" Classes="sectionHeading" Text="Invite" />
+              <TextBlock Name="InviteClock" Grid.Column="1" FontSize="12" HorizontalAlignment="Right"
+                         TextAlignment="Right" VerticalAlignment="Bottom" Margin="12,0,0,1" IsVisible="False" />
+            </Grid>
           </Border>
           <TextBox Name="ShareBox" IsReadOnly="True" FontSize="13"
                    TextWrapping="Wrap" MaxHeight="80"
@@ -114,7 +118,10 @@
         <StackPanel Name="JoinWaitPage" IsVisible="False" />
 
         <StackPanel Name="ChooseArmyPage" Spacing="6" IsVisible="False">
-          <Grid ColumnDefinitions="Auto,*" Margin="0,2,0,0">
+          <Border Name="ArmyHead" Classes="shelfHeader" Margin="0,2,0,0" IsVisible="False">
+            <TextBlock Name="ArmyHeading" Classes="sectionHeading" Text="Army" />
+          </Border>
+          <Grid ColumnDefinitions="Auto,*" Margin="0,4,0,0">
             <TextBlock Name="ArmyCostLine" FontSize="13" FontWeight="SemiBold"
                        VerticalAlignment="Center" Margin="0,0,12,0" IsVisible="False" />
             <ComboBox Name="ArmyBox" Grid.Column="1" HorizontalAlignment="Right" />
@@ -125,20 +132,31 @@
           </ScrollViewer>
         </StackPanel>
 
-        <StackPanel Name="SafetyPage" Spacing="6" IsVisible="False">
-          <Border Classes="shelfHeader" Margin="0,2,0,0">
-            <TextBlock Name="SafetyLabel" Classes="sectionHeading" Text="Your code" />
+        <StackPanel Name="SafetyPage" IsVisible="False">
+          <Border Name="SafetyHead" Classes="shelfHeader" Margin="0,2,0,0">
+            <TextBlock Name="SafetyLabel" Classes="sectionHeading" Text="Safety code" />
           </Border>
-          <Border Classes="controlBar" HorizontalAlignment="Stretch" Padding="12,10">
-            <TextBlock Name="SafetyCode" FontFamily="Consolas" FontSize="18" FontWeight="Bold"
-                       TextWrapping="Wrap" HorizontalAlignment="Center" TextAlignment="Center" />
-          </Border>
-          <TextBox Name="TypedCode" Width="150" MaxLength="4" FontSize="13"
-                   HorizontalAlignment="Left" Margin="0,6,0,0"
-                   PlaceholderText="Their four" />
+          <Grid Name="SafetyForm" RowDefinitions="Auto,Auto" ColumnDefinitions="Auto,*">
+            <Border Grid.Row="0" Grid.ColumnSpan="2" Classes="formRule" />
+            <Border Grid.Row="1" Grid.ColumnSpan="2" Classes="formRule" />
+            <TextBlock Name="YourCodeLabel" FontSize="13" Text="Yours"
+                       VerticalAlignment="Center" Margin="0,0,20,0" />
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" Margin="0,10">
+              <StackPanel Name="ReadOutCells" Orientation="Horizontal" Spacing="8" />
+              <Button Name="ShowCodeButton" Classes="inlineAction eye"
+                      VerticalAlignment="Center" />
+            </StackPanel>
+            <TextBlock Name="TheirCodeLabel" Grid.Row="1" FontSize="13" Text="Theirs"
+                       VerticalAlignment="Center" Margin="0,0,20,0" />
+            <Panel Grid.Row="1" Grid.Column="1" HorizontalAlignment="Left" Margin="0,10">
+              <StackPanel Name="TypedCells" Orientation="Horizontal" Spacing="8" IsHitTestVisible="False" />
+              <TextBox Name="TypedCode" Opacity="0" MaxLength="16" MinWidth="0" MinHeight="0"
+                       Padding="0" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+            </Panel>
+          </Grid>
         </StackPanel>
 
-        <StackPanel Name="SetUpPage" Spacing="8" IsVisible="False">
+        <StackPanel Name="SetUpPage" Spacing="5" IsVisible="False">
           <Border Classes="shelfHeader" Margin="0,2,0,0">
             <Grid ColumnDefinitions="Auto,*">
               <TextBlock Name="StepsHeading" Classes="sectionHeading" Text="Steps" />
@@ -150,15 +168,15 @@
           <StackPanel Name="SetUpList" Spacing="0" />
         </StackPanel>
 
-        <StackPanel Name="PlayingPage" Spacing="8" IsVisible="False">
+        <StackPanel Name="PlayingPage" Spacing="4" IsVisible="False">
           <Border Classes="shelfHeader" Margin="0,2,0,0">
             <TextBlock Name="MatchHeading" Classes="sectionHeading" Text="Match" />
           </Border>
-          <Border Classes="controlBar" HorizontalAlignment="Stretch" Padding="12,8">
+          <Border Classes="controlBar" HorizontalAlignment="Stretch" Padding="0,6">
             <Grid ColumnDefinitions="Auto,*">
               <Border Name="PlaySyncDot" Classes="syncDot" VerticalAlignment="Top"
-                      Margin="0,4,8,0" />
-              <TextBlock Name="PlayStatus" Grid.Column="1" FontSize="12" TextWrapping="Wrap"
+                      Margin="0,5,8,0" />
+              <TextBlock Name="PlayStatus" Grid.Column="1" FontSize="13" TextWrapping="Wrap"
                          Text="Waiting for the first turn." />
             </Grid>
           </Border>
@@ -168,19 +186,16 @@
     </ScrollViewer>
 
     <Grid Grid.Row="3" ColumnDefinitions="Auto,*,Auto" Margin="0,10,0,0">
+      <Button Name="NewInviteButton" Classes="glass action" Content="New invite"
+              MinWidth="140" IsEnabled="False" IsVisible="False" />
       <Button Name="UseArmyButton" Classes="glass action primary" Content="Use this army"
               MinWidth="140" IsVisible="False" />
-      <Button Name="CodeMatchesButton" Classes="glass action primary"
-              MinWidth="140" IsEnabled="False" IsVisible="False">
-        <Panel>
-          <TextBlock Text="Codes match, continue" Opacity="0" />
-          <TextBlock Text="Continue unverified" Opacity="0" />
-          <TextBlock Text="Codes differ" Opacity="0" />
-          <TextBlock Name="ContinueLabel" Text="Continue" HorizontalAlignment="Center" />
-        </Panel>
-      </Button>
+      <Button Name="CodeMatchesButton" Classes="glass action primary" Content="Continue"
+              MinWidth="140" IsEnabled="False" IsVisible="False" />
       <Button Name="WriteButton" Classes="glass action primary" Content="Set up the match"
               MinWidth="140" IsVisible="False" />
+      <Button Name="ReportProblemButton" Classes="glass action primary" Content="Send report" MinWidth="140"
+              IsVisible="False" />
       <Button Name="StopButton" Grid.Column="2" Classes="glass action" Content="Stop"
               MinWidth="64" HorizontalAlignment="Right" IsVisible="False" />
     </Grid>

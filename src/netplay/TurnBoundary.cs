@@ -327,7 +327,7 @@ internal sealed class TurnTracker
             return null;
         }
 
-        var from = BaselineFor(firstMark);
+        var from = SliceStart(firstMark);
         var slice = _buffer.GetRange(from, last - from);
         Reset(last);
         return slice;
@@ -344,6 +344,47 @@ internal sealed class TurnTracker
         }
 
         return -1;
+    }
+
+    private int SliceStart(int firstMark)
+    {
+        var from = BaselineFor(firstMark);
+        var handOver = HandOverAtOrBefore(from);
+        if (handOver < 0 || !OursCommittedIn(handOver + 1, from))
+        {
+            return from;
+        }
+
+        return handOver;
+    }
+
+    private int HandOverAtOrBefore(int upTo)
+    {
+        if (_localOwner is not (0 or 1) || _buffer[upTo].Turn != _localOwner)
+        {
+            return -1;
+        }
+
+        var i = upTo;
+        while (i > 0 && _buffer[i - 1].Turn == _localOwner)
+        {
+            i--;
+        }
+
+        return i;
+    }
+
+    private bool OursCommittedIn(int first, int last)
+    {
+        for (var k = first; k <= last; k++)
+        {
+            if (_buffer[k].Commits is { } batch && batch.Records.Any(r => r.IsHuman))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private int BaselineFor(int firstMark)
@@ -628,7 +669,7 @@ internal sealed class TurnTracker
         }
 
         var firstMark = FirstMark(_buffer.Count);
-        var from = firstMark > 0 ? BaselineFor(firstMark) : LastOpponentTurnEnd();
+        var from = firstMark > 0 ? SliceStart(firstMark) : LastOpponentTurnEnd();
 
         return _buffer.GetRange(from, _buffer.Count - from);
     }

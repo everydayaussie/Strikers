@@ -7,6 +7,11 @@ internal static partial class Program
 {
     private static bool Write(ulong address, byte[] bytes)
     {
+        return Write(address, bytes, quiet: false);
+    }
+
+    private static bool Write(ulong address, byte[] bytes, bool quiet)
+    {
         if (WriteProcessMemory(_handle, (nint)address, bytes, bytes.Length, out var written) &&
             written == bytes.Length)
         {
@@ -24,8 +29,12 @@ internal static partial class Program
             }
         }
 
-        Console.Error.WriteLine($"  WriteProcessMemory failed at 0x{address:X} ({Marshal.GetLastWin32Error()}). " +
-                                "Run as administrator.");
+        if (!quiet)
+        {
+            Console.Error.WriteLine($"  WriteProcessMemory failed at 0x{address:X} ({Marshal.GetLastWin32Error()}). " +
+                                    "Run as administrator.");
+        }
+
         return false;
     }
 

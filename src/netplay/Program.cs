@@ -7,6 +7,20 @@ namespace Strikers.Netplay;
 
 internal static partial class Program
 {
+    internal const string FrozenLine =
+        "  the local match is being FROZEN (live-probe --freeze). Only a person releases it, with: " +
+        "live-probe --freeze --clear.";
+
+    internal static string FrozenLineFor(string reason)
+    {
+        if (reason == Injector.GateHaltText)
+        {
+            return FrozenLine + " After this halt a release can close the game.";
+        }
+
+        return FrozenLine;
+    }
+
     internal static byte[]? BindingFrom(string? text)
     {
         if (text is not { Length: KeyExchange.BindingLength * 2 } || !text.All(Uri.IsHexDigit))
@@ -206,6 +220,23 @@ internal static partial class Program
             var tr = new TurnTracker(owner);
             var found = 0;
             var bad = 0;
+            var judged = 0;
+            var judgedBad = 0;
+
+            void Judge(IReadOnlyList<Move> moves, BoardSnapshot start)
+            {
+                if (moves.Count == 0)
+                {
+                    return;
+                }
+
+                judged++;
+                if (Machines.TurnProblem(moves, start, owner) is { } receiverProblem)
+                {
+                    Console.Error.WriteLine($"  RECEIVER REFUSES: {receiverProblem}");
+                    judgedBad++;
+                }
+            }
 
             for (var i = 0; i < parsed.Count; i++)
             {
@@ -238,6 +269,8 @@ internal static partial class Program
                 {
                     Console.WriteLine($"  {Describe(m)}");
                 }
+
+                Judge(r.Moves, cut[0]);
             }
 
             if (tr.Flush() is { } tail)
@@ -255,6 +288,11 @@ internal static partial class Program
                     {
                         Console.WriteLine($"  {Describe(m)}");
                     }
+
+                    if (tail.Count >= 2)
+                    {
+                        Judge(r.Moves, tail[0]);
+                    }
                 }
                 else
                 {
@@ -263,7 +301,8 @@ internal static partial class Program
             }
 
             Console.WriteLine($"\n{found} complete turn(s), {bad} refused");
-            return bad == 0 ? 0 : 1;
+            Console.WriteLine($"receiver refused {judgedBad} of {judged} read turn(s)");
+            return bad == 0 && judgedBad == 0 ? 0 : 1;
         }
 
         var hashPath = ArgStr(args, "--hash");
@@ -291,19 +330,11 @@ internal static partial class Program
 
         var port = ArgInt(args, "--port") ?? 47801;
 
-        var (testFor, testExpires) = TestBuild.Read(typeof(Program).Assembly);
         if (args.Contains("--version"))
         {
             var mvid = System.Reflection.Assembly.GetExecutingAssembly().ManifestModule.ModuleVersionId;
-            var mark = TestBuild.Mark(testFor, testExpires);
-            Console.WriteLine($"netplay {mvid:N}  protocol {Protocol.Version}" + (mark is null ? "" : $"  ({mark})"));
+            Console.WriteLine($"netplay {mvid:N}  protocol {Protocol.Version}");
             return 0;
-        }
-
-        if (TestBuild.Expired(testExpires, DateOnly.FromDateTime(DateTime.Now)))
-        {
-            Console.Error.WriteLine($"  {TestBuild.ExpiredMessage()}");
-            return 3;
         }
 
         if (ArgStr(args, "--dump-preset") is { } dumpName)
@@ -406,6 +437,7 @@ internal static partial class Program
         }
 
         var peer = new Peer(server, port, room, joining ? 1 : 0, routingId: routingId);
+        _livePeer = peer;
 
         if (args.Contains("--lobby"))
         {
@@ -444,18 +476,21 @@ internal static partial class Program
                 return 2;
             }
 
-            Peer.OnHalt = _ =>
+            Peer.OnHalt = reason =>
             {
+                SendOurFiles(_livePeer);
+                SayIfTheirsNeverCame();
+                AfterHalt.Start();
+
                 try
                 {
                     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(probe, "--freeze")
                     { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true });
-                    Console.Error.WriteLine("  the local match is being FROZEN (live-probe --freeze); " +
-                                            "release by hand with: live-probe --freeze --clear");
+                    Console.Error.WriteLine(FrozenLineFor(reason));
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"  could not freeze the match: {ex.Message}");
+                    Console.Error.WriteLine($"  could not freeze the match ({ex.GetType().Name})");
                 }
             };
 
@@ -464,6 +499,8 @@ internal static partial class Program
                 _playArmy = [.. playArmy.Select(m => Lobby.NormaliseUuid(m) ?? m)];
                 Console.WriteLine($"  your army: {_playArmy.Count} machine(s)");
             }
+
+            _playArmyName = ArmyNameFromHex(ArgStr(args, ArmyNameHexFlag));
 
             if (ArgStr(args, "--preset") is { } playPresetName)
             {
@@ -489,7 +526,11 @@ internal static partial class Program
 
             foreach (var clear in StartClears)
             {
-                RunProbeQuiet(probe, clear);
+                if (ProbeRefusedBuild(RunProbeQuiet(probe, clear)) is { } refused)
+                {
+                    Console.Error.WriteLine(refused);
+                    return 2;
+                }
             }
 
             ApplyCommitRing(probe);
@@ -557,10 +598,9 @@ internal static partial class Program
                 {
                     try
                     {
-                        var misses = 0;
-                        while (!cts.IsCancellationRequested && ReadSnapshot(probe) is null)
+                        while (peer.RemoteRole is null && !cts.IsCancellationRequested)
                         {
-                            await Task.Delay(SnapshotPollDelay(misses++, 1000), cts.Token);
+                            await Task.Delay(100, cts.Token);
                         }
 
                         for (var i = 0; i < 10 && peer.RemoteName is null && !cts.IsCancellationRequested; i++)
@@ -569,13 +609,16 @@ internal static partial class Program
                         }
 
                         if (cts.IsCancellationRequested ||
-                            NameArgs(peer.LocalName, peer.RemoteName) is not { Length: > 0 } naming)
+                            NameArgs(peer.LocalName, peer.RemoteName, _playArmyName) is not { Length: > 0 } naming)
                         {
                             return;
                         }
 
-                        Console.WriteLine("  writing the player names onto the board");
-                        RunProbeQuiet(probe, [.. naming, "--yes"]);
+                        Console.WriteLine("  the player names go onto the board as soon as the match loads");
+                        if (RunProbeUntilArmed(probe, out _, NamesHoldArgs(naming, Environment.ProcessId)) != 0)
+                        {
+                            Console.Error.WriteLine("  Warning: the names were not written, or their hold did not start");
+                        }
                     }
                     catch (OperationCanceledException) { }
                 }, cts.Token);
@@ -611,8 +654,12 @@ internal static partial class Program
                         foreach (var their in f.Moves)
                         {
                             var local = their.Rotated(turnShape.Width, turnShape.Height);
+                            var stood = local.LandX >= 0 && local.LandY >= 0
+                                        && (local.LandX != local.DstX || local.LandY != local.DstY)
+                                ? $", their machine stood on ({local.LandX},{local.LandY}) afterwards"
+                                : "";
                             Console.WriteLine($"     ({their.SrcX},{their.SrcY})->({their.DstX},{their.DstY}) " +
-                                              $"in their frame = ({local.SrcX},{local.SrcY})->({local.DstX},{local.DstY}) in ours");
+                                              $"in their frame = ({local.SrcX},{local.SrcY})->({local.DstX},{local.DstY}) in ours{stood}");
                             localTurn.Add(local);
                         }
                         lock (pending)
@@ -631,6 +678,12 @@ internal static partial class Program
 
                     case MsgKind.Move:
                         Console.Error.WriteLine("  <- a Move frame with no actions (a pre-v3 peer?), nothing applied");
+                        break;
+
+                    case MsgKind.Recording:
+                    case MsgKind.RecordingStart:
+                    case MsgKind.Log:
+                        TakeFile(peer, f);
                         break;
 
                     case MsgKind.Place when f.Place is not null:
@@ -740,11 +793,9 @@ internal static partial class Program
                         continue;
                     }
 
-                    if (!await injector.Apply(next.Value.Turn, next.Value.Final, cts.Token))
+                    if (!await injector.Apply(next.Value.Turn, next.Value.Final))
                     {
-                        peer.HaltAndTell(
-                            $"injection failed on a turn of {next.Value.Turn.Count} action(s), this board may hold only " +
-                            "part of it.\n    Do not play on: compare both boards before restarting.");
+                        peer.HaltAndTell(Injector.HaltReason(injector.LastExit, next.Value.Turn.Count));
                     }
 
 

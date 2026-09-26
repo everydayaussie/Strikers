@@ -237,46 +237,6 @@ internal static partial class Program
         }
     }
 
-    private static int AllocBytes(string[] args, int valueIndex)
-    {
-        if (valueIndex >= args.Length)
-        {
-            Console.Error.WriteLine("--alloc-bytes <hex bytes> [--yes]");
-            return 1;
-        }
-
-        var hex = args[valueIndex].Replace("0x", "").Replace(" ", "");
-        if (hex.Length % 2 != 0 || hex.Length == 0)
-        {
-            Console.Error.WriteLine("--alloc-bytes: byte string must have an even number of hex digits.");
-            return 1;
-        }
-
-        var bytes = Convert.FromHexString(hex);
-        Console.WriteLine($"\n  allocate a 4 KB read-write page and write {bytes.Length} bytes at its start");
-        if (!args.Contains("--yes"))
-        {
-            Console.WriteLine("\n  dry run, nothing allocated. Add --yes to apply.");
-            return 0;
-        }
-
-        var page = (ulong)VirtualAllocEx(_handle, 0, 0x1000, 0x1000 | 0x2000, 0x04);
-        if (page == 0)
-        {
-            Console.Error.WriteLine($"  VirtualAllocEx failed ({Marshal.GetLastWin32Error()}).");
-            return 1;
-        }
-
-        if (!Write(page, bytes))
-        {
-            return 1;
-        }
-
-        Console.WriteLine($"  page    0x{page:X}");
-        Console.WriteLine($"  after   0x{page:X}  {Convert.ToHexString(Read(page, bytes.Length))}");
-        return 0;
-    }
-
     private static int Poke(ulong address, string[] args, int valueIndex)
     {
         if (address == 0 || valueIndex >= args.Length)
@@ -481,7 +441,6 @@ internal static partial class Program
     private const ulong UnitPlacingPhaseVtableRva = 0x190E638;
     private const ulong AutoPlacingCtrlVtableRva = 0x190E2F8;
     private const ulong AiPlacingCtrlVtableRva = 0x190E808;
-    private const ulong HumanPlacingCtrlVtableRva = 0x190DCC0;
 
     private static string TileTypeName(int t)
     {
@@ -530,6 +489,19 @@ internal static partial class Program
 
     private static List<(ulong Base, ulong Size)> ScanRegions()
     {
+        return ScanRegions(heapOnly: false);
+    }
+
+    internal const uint PrivateMemory = 0x20000;
+    internal const uint PlainReadWrite = 0x04;
+
+    internal static bool HeapRegion(uint type, uint protect)
+    {
+        return type == PrivateMemory && protect == PlainReadWrite;
+    }
+
+    private static List<(ulong Base, ulong Size)> ScanRegions(bool heapOnly)
+    {
         var regions = new List<(ulong Base, ulong Size)>();
         ulong address = 0x10000;
 
@@ -544,7 +516,7 @@ internal static partial class Program
                            (info.Protect & 0x100) == 0 &&
                            (info.Protect & 0xFF) is not (0 or 0x01);
 
-            if (readable && info.RegionSize <= 0x4000000)
+            if (readable && info.RegionSize <= 0x4000000 && (!heapOnly || HeapRegion(info.Type, info.Protect)))
             {
                 regions.Add((info.BaseAddress, info.RegionSize));
             }

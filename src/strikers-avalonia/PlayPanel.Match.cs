@@ -17,6 +17,8 @@ public partial class PlayPanel
 
     private bool writing;
 
+    private bool setupFailed;
+
     private int linkDowns;
     private (string Headline, string What, bool Technical, int SlowAfter, DateTime Since)? pausedWait;
 
@@ -56,6 +58,7 @@ public partial class PlayPanel
         waitingSlowAfter = slowAfter;
         waitingSince = since;
         waiting = true;
+        Find<Button>("ReportProblemButton").IsVisible = false;
         Ink("StepLine", Palette.SlateDark.Text);
         Ink("DetailLine", Palette.SlateDark.Muted);
 
@@ -106,16 +109,35 @@ public partial class PlayPanel
         Find<Arc>("WaitSpinner").IsVisible = false;
     }
 
-    private void WaitForJoin()
+    private void InviteMade()
     {
-        StartWaiting("Send the invite", "Copy it and send it to your opponent. Waiting for them to join.",
-                     technical: false);
+        inviteClock.Heard(Play.InviteClock.Event.Made, DateTime.UtcNow);
+        WaitForJoin();
     }
 
-    private string HostingHeadline()
+    private void WaitForJoin()
     {
-        return "Hosting a match";
+        Find<Button>("NewInviteButton").IsEnabled = true;
+        StartWaiting("Send the invite", "Copy it and send it to your opponent.", technical: false);
+        ShowInviteClock();
     }
+
+    private void ShowInviteClock()
+    {
+        var clock = Find<TextBlock>("InviteClock");
+        if (inviteClock.Left(DateTime.UtcNow) is not { } left || flow.Current != Stage.HostInvite)
+        {
+            clock.IsVisible = false;
+            return;
+        }
+
+        var (text, urgent) = Play.InviteClockText(left);
+        Ink("InviteClock", urgent ? Palette.SlateDark.Bad : Palette.SlateDark.Muted);
+        clock.Text = text;
+        clock.IsVisible = true;
+    }
+
+    private const string HostingHeadline = "Creating the invite";
 
     private void NewAttempt()
     {
@@ -135,28 +157,37 @@ public partial class PlayPanel
         armySent = false;
         peerLeftAt = null;
         halted = false;
+        codeShown = false;
+        opponentName = null;
+        inviteClock.Heard(Play.InviteClock.Event.NewAttempt, DateTime.UtcNow);
+        Attention.Settle(TopLevel.GetTopLevel(this) as Window);
         pendingCode = null;
         sessionBinding = null;
         tunnelServer = null;
         Find<Button>("WriteButton").IsEnabled = true;
+        ForgetStop();
     }
 
     private void ResetSafetyInputs()
     {
+        codeShown = false;
+        DrawEye();
         var typed = Find<TextBox>("TypedCode");
         typed.Text = "";
         typed.IsEnabled = true;
         confirmedByMe = false;
         confirmedByPeer = false;
         sessionBinding = null;
+        setupFailed = false;
         Find<Button>("CodeMatchesButton").IsEnabled = false;
-        SetContinueLabel("Continue");
+        DrawTypedCells();
     }
 
     private void WaitForTheirArmy()
     {
         Find<ComboBox>("ArmyBox").IsVisible = false;
         Find<ScrollViewer>("ArmyScroll").IsVisible = false;
+        ShowArmyHead();
         Find<TextBlock>("ArmyCostLine").IsVisible = false;
         Find<Button>("UseArmyButton").IsVisible = false;
         Reflow();
@@ -208,6 +239,11 @@ public partial class PlayPanel
         return writing || playStarted || playSpawned;
     }
 
+    private bool BothConfirmedAtSetUp()
+    {
+        return Play.BothConfirmedAtSetUp(flow.Current, confirmedByMe, confirmedByPeer);
+    }
+
     private void CheckOpponentLeft()
     {
         if (!Play.ScreenMayChange(halted, startIdle: false))
@@ -216,16 +252,23 @@ public partial class PlayPanel
             return;
         }
 
-        if (peerLeftAt is not { } at || (DateTime.UtcNow - at).TotalSeconds < Play.OpponentLeftAfter)
+        if (peerLeftAt is not { } at)
+        {
+            return;
+        }
+
+        var verdict = Play.JudgeOpponentLeft((DateTime.UtcNow - at).TotalSeconds, AtPlayStage(),
+                                             BothConfirmedAtSetUp());
+        if (verdict == Play.OpponentLeftVerdict.Nothing)
         {
             return;
         }
 
         peerLeftAt = null;
-        if (AtPlayStage())
+        if (verdict == Play.OpponentLeftVerdict.WaitInPlace)
         {
             StartWaiting("Your opponent left",
-                         "Waiting for them to come back. If this does not clear, press Stop and start again.",
+                         "Waiting for them to come back. If they do not, press Stop.",
                          technical: false);
             return;
         }
@@ -235,11 +278,12 @@ public partial class PlayPanel
             fingerprint.Reset();
         }
 
-        BackToTheirArmy(armySent ? null : "Your opponent left. The same invite still works if they come back.");
+        BackToTheirArmy(armySent ? null : "Your opponent left. The same invite works if they join again.");
+        inviteClock.Heard(Play.InviteClock.Event.KeyedPeerGone, DateTime.UtcNow);
         if (armySent)
         {
             StartWaiting("Your opponent left",
-                         "Waiting for them to come back with the same invite. If they do not, press Stop and start again.",
+                         "Waiting for them to rejoin with the same invite. If they do not, press Stop.",
                          technical: false);
         }
     }
@@ -251,7 +295,12 @@ public partial class PlayPanel
             return;
         }
 
-        if (!driver.TypeAtLobby([$"confirm {fingerprint.Code}"], "> confirm", "Nothing to confirm to"))
+        if (!Play.SafetyTypedState(fingerprint.Code, Find<TextBox>("TypedCode").Text ?? "", flow.Hosting).Continue)
+        {
+            return;
+        }
+
+        if (!driver.TypeAtLobby([$"confirm {fingerprint.Code}"], "> confirm", Play.PartClosedHeadline))
         {
             return;
         }
@@ -288,14 +337,10 @@ public partial class PlayPanel
         Say("Connected again", "Carry on where you were.");
     }
 
-    private void SayBad(string headline, string detail, bool detailToo = false)
+    private void SayBad(string headline, string detail)
     {
         Say(headline, detail);
         Ink("StepLine", Palette.SlateDark.Bad);
-        if (detailToo)
-        {
-            Ink("DetailLine", Palette.SlateDark.Bad);
-        }
     }
 
     private void Ticked()
@@ -303,16 +348,63 @@ public partial class PlayPanel
         ShowWaiting();
         ShowPlayClock();
         CheckOpponentLeft();
+        CheckInviteWentStale();
+        ShowInviteClock();
+        CheckReportSettled();
 
-        if (!IsWaiting() && playSpawned is false && peerLeftAt is null)
+        if (!IsWaiting() && playSpawned is false && peerLeftAt is null && reportPendingSince is null
+            && !inviteClock.Running)
         {
             tick.Stop();
         }
     }
 
-    private static string LogWhy()
+    private void CheckInviteWentStale()
     {
-        return Play.WhereTheLogIs;
+        if (!flow.Hosting || AtPlayStage() || !inviteClock.RunOut(DateTime.UtcNow))
+        {
+            return;
+        }
+
+        inviteClock.Heard(Play.InviteClock.Event.RanOut, DateTime.UtcNow);
+        if (Play.InviteExpiredText(halted) is not { } expired)
+        {
+            driver.StopAllAndDropStragglers();
+            return;
+        }
+
+        flow.Rewind(Stage.HostInvite);
+        ShowStage(flow.Current);
+        driver.StopAllAndDropStragglers();
+        Find<Button>("StopButton").IsVisible = true;
+        MaskInvite();
+        Find<TextBox>("ShareBox").Text = "";
+        Find<Button>("CopyInviteButton").IsEnabled = false;
+        SayBad(expired.Headline, expired.Detail);
+    }
+
+    private void NewInvite()
+    {
+        if (flow.Current != Stage.HostInvite)
+        {
+            ToastRail.Show(ToastKind.Bad, "There is no invite to replace yet.");
+            return;
+        }
+
+        HostSetup? setup = null;
+        var restarted = driver.Restart(() =>
+        {
+            setup = HostingReady();
+            return setup is not null;
+        });
+
+        if (!restarted || setup is not { } ready)
+        {
+            return;
+        }
+
+        BeginHosting(ready);
+        ToastRail.Show(ToastKind.Good, "The old invite no longer works.");
     }
 
     private void ShowWaiting()
@@ -348,6 +440,28 @@ public partial class PlayPanel
         clock.IsVisible = true;
     }
 
+    private readonly record struct HostSetup(ChallengeBridge.Challenge Challenge, List<int>? Board,
+                                             (int Width, int Height, int PlacementRows) Shape);
+
+    private HostSetup? HostingReady()
+    {
+        if (hostChallenge is not { } picked)
+        {
+            ToastRail.Show(ToastKind.Bad, "The challenge list has not loaded yet. Try again in a moment.");
+            return null;
+        }
+
+        var (board, shape, boardProblem) = ChosenBoard();
+        if (boardProblem is not null)
+        {
+            ToastRail.Show(ToastKind.Bad, boardProblem);
+            RefreshBoards();
+            return null;
+        }
+
+        return new HostSetup(picked, board, shape);
+    }
+
     private void StartHosting()
     {
         if (!driver.BeginStart())
@@ -355,24 +469,20 @@ public partial class PlayPanel
             return;
         }
 
-        if (hostChallenge is not { } picked)
+        if (HostingReady() is not { } setup)
         {
             driver.CancelStart();
-            ToastRail.Show(ToastKind.Bad, "That challenge is not available. The challenge list has not loaded.");
             return;
         }
 
-        chosen = picked;
-        var (board, boardProblem) = ChosenBoard();
-        if (boardProblem is not null)
-        {
-            driver.CancelStart();
-            ToastRail.Show(ToastKind.Bad, $"That board is not where it was. {boardProblem}");
-            RefreshBoards();
-            return;
-        }
+        BeginHosting(setup);
+    }
 
-        hostBoard = board;
+    private void BeginHosting(HostSetup setup)
+    {
+        chosen = setup.Challenge;
+        hostBoard = setup.Board;
+        hostShape = setup.Shape;
         budget = ChosenDraftPoints();
 
         firstPlayer = Play.FirstFromPick(Find<ComboBox>("FirstBox").SelectedIndex, Random.Shared.Next(2) == 1);
@@ -387,7 +497,7 @@ public partial class PlayPanel
         Find<TextBox>("ShareBox").Text = "";
         Find<Button>("CopyInviteButton").IsEnabled = false;
 
-        StartWaiting(HostingHeadline(), "Reaching the relay.");
+        StartWaiting(HostingHeadline, "");
 
         pages[Stage.Start].IsVisible = false;
         Find<Button>("StopButton").IsVisible = true;
@@ -397,7 +507,18 @@ public partial class PlayPanel
 
         _ = Task.Run(async () =>
         {
-            var (server, note) = await TunnelDns.LookUpAsync(TunnelDns.DefaultServer);
+            (string Host, string? Note)? lookup;
+            string? failure = null;
+            try
+            {
+                lookup = await TunnelDns.LookUpAsync(TunnelDns.DefaultServer);
+            }
+            catch (Exception e)
+            {
+                lookup = null;
+                failure = e.GetType().Name;
+            }
+
             Dispatcher.UIThread.Post(() =>
             {
                 if (!driver.StillWanted(attempt))
@@ -405,12 +526,22 @@ public partial class PlayPanel
                     return;
                 }
 
+                if (lookup is not { } found)
+                {
+                    driver.Say($"  network: the lookup failed ({failure})");
+                    driver.CancelStart();
+                    StopWaiting();
+                    SayBad("Could not create the invite", "Press Stop and try again.");
+                    return;
+                }
+
+                var (server, note) = found;
                 if (note is not null)
                 {
                     driver.Say($"  network: {note}");
                 }
 
-                StartWaiting(HostingHeadline(), "Opening a public address.");
+                StartWaiting(HostingHeadline, "");
 
                 if (MatchDriver.FreePort() is not { } port)
                 {
@@ -442,6 +573,15 @@ public partial class PlayPanel
             return;
         }
 
+        var pin = Play.PinInvite(address, null);
+        if (pin == Play.InvitePin.Refuse)
+        {
+            driver.CancelStart();
+            driver.Say(JoinRefusedLine);
+            ToastRail.Show(ToastKind.Bad, NotOurInvite);
+            return;
+        }
+
         NewAttempt();
         chosen = null;
         budget = -1;
@@ -457,9 +597,61 @@ public partial class PlayPanel
         Find<Button>("StopButton").IsVisible = true;
         TellFocus(true);
 
+        if (pin == Play.InvitePin.Accept)
+        {
+            SpawnJoin(address, room, code);
+            return;
+        }
+
+        var attempt = driver.Generation;
+        _ = Task.Run(async () =>
+        {
+            IReadOnlyCollection<string> answers;
+            try
+            {
+                answers = await TunnelDns.AnswersAsync(TunnelDns.DefaultServer);
+            }
+            catch (Exception)
+            {
+                answers = [];
+            }
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!driver.StillWanted(attempt))
+                {
+                    return;
+                }
+
+                if (Play.PinInvite(address, answers) != Play.InvitePin.Accept)
+                {
+                    RefuseJoin();
+                    return;
+                }
+
+                SpawnJoin(address, room, code);
+            });
+        });
+    }
+
+    private const string JoinRefusedLine = "  join refused: the invite does not name the tunnel";
+
+    private void SpawnJoin(string address, string room, string code)
+    {
         driver.Spawn(Play.LobbyArgs(hosting: false, code, room, address, Settings.Read().Name,
                                     "", null, -1, -1, Play.FirstHost),
                      keepInput: true);
+    }
+
+    private void RefuseJoin()
+    {
+        driver.Say(JoinRefusedLine);
+        driver.StopAll();
+        NewAttempt();
+        tick.Stop();
+        StopWaiting();
+        BackToStart();
+        ToastRail.Show(ToastKind.Bad, NotOurInvite);
     }
 
     private void StartPlay()
@@ -476,12 +668,13 @@ public partial class PlayPanel
         }
 
         playSpawned = true;
+        Identity.Refresh();
         playSince = DateTime.UtcNow;
         tick.Start();
 
         var play = new List<string>(Play.PlayArgs(flow.Hosting, driver.RoomCode, roomId, serverAddress,
                                                   Settings.Read().Name, Play.ArmyIds(army), sessionBinding,
-                                                  firstPlayer));
+                                                  firstPlayer, armyName));
         if (NetplayTool.LiveProbe() is { } probe)
         {
             play.Add("--live-probe");
@@ -493,15 +686,16 @@ public partial class PlayPanel
 
     private void WriteSetup()
     {
-        if (driver.TypeAtLobby(["write"], "> write", "Nothing to set up") is false)
+        if (driver.TypeAtLobby(["write"], "> write", Play.PartClosedHeadline) is false)
         {
             return;
         }
 
         Find<Button>("WriteButton").IsEnabled = false;
         writing = true;
+        setupFailed = false;
 
-        StartWaiting("Writing the setup into the game",
+        StartWaiting("Setting up the match",
                      $"This takes about half a minute. {Play.DoNotEnterYet}",
                      technical: true, slowAfter: Play.WriteSlowAfter);
     }
@@ -516,7 +710,7 @@ public partial class PlayPanel
         playStarted = true;
         writing = false;
 
-        StartWaiting("Setup written", $"Connecting. {Play.DoNotEnterYet}");
+        StartWaiting("Setting up the match", Play.DoNotEnterYet);
         driver.EndLobby();
     }
 
@@ -524,7 +718,7 @@ public partial class PlayPanel
     {
         if (army.Count == 0)
         {
-            ToastRail.Show(ToastKind.Bad, "No army chosen. Pick one above.");
+            ToastRail.Show(ToastKind.Bad, "Pick an army first.");
             return;
         }
 
@@ -537,31 +731,36 @@ public partial class PlayPanel
         var cost = Play.ArmyCost(army, machines);
         if (cost > Budget())
         {
-            ToastRail.Show(ToastKind.Bad,
-                           $"That army costs {cost}, and the limit is {Budget()}. Pick a cheaper one, "
-                           + "or press Stop and build one.");
+            ToastRail.Show(ToastKind.Bad, $"That army costs {cost} and the limit is {Budget()}. Pick a cheaper one.");
             return;
         }
 
         if (army.Count > Play.MaxArmy)
         {
-            ToastRail.Show(ToastKind.Bad,
-                           $"That army is too big: {army.Count} machines, and a side may field {Play.MaxArmy}.");
+            ToastRail.Show(ToastKind.Bad, $"That army has {army.Count} machines. The most is {Play.MaxArmy}.");
             return;
+        }
+
+        if (flow.Hosting)
+        {
+            var squares = Play.PlacingSquares(hostShape.Width, hostShape.PlacementRows);
+            if (Play.ArmyDoesNotFit(army.Count, squares) is { } tooBig)
+            {
+                ToastRail.Show(ToastKind.Bad, tooBig);
+                return;
+            }
         }
 
         var safe = Play.ArmyIds(army);
         if (safe.Count != army.Count)
         {
-            ToastRail.Show(ToastKind.Bad,
-                           "That army has a bad entry: one of its machines is not a valid id. "
-                           + "Rebuild it in the Armies panel.");
+            ToastRail.Show(ToastKind.Bad, "That army has a machine Strikers does not know. Rebuild it in the Armies panel.");
             return;
         }
 
         var sent = driver.TypeAtLobby([$"army {string.Join(' ', safe)}", "place auto", "ready"],
                                       "> army / place auto / ready",
-                                      "Nothing to send it to");
+                                      Play.PartClosedHeadline);
         if (sent)
         {
             armySent = true;
@@ -584,6 +783,7 @@ public partial class PlayPanel
 
     private void StopAll()
     {
+        driver.Say(Play.StopPressedLine(flow.Current, halted));
         var unsignalled = SignalDraftGuard();
         if (unsignalled is not null)
         {
@@ -602,8 +802,7 @@ public partial class PlayPanel
             return;
         }
 
-        ToastRail.Show(ToastKind.Bad, "Stopped, but the game may still hold the set-up. Do not back out of " +
-                                      "the challenge list for ten minutes.");
+        ToastRail.Show(ToastKind.Bad, "Stopped. Do not back out of the challenge list for ten minutes.");
     }
 
     public void ShutDown()
@@ -614,18 +813,35 @@ public partial class PlayPanel
 
     private void Interpret(string line)
     {
+        var read = NetplayLine.Read(line, flow.Hosting && driver.AnythingRunning,
+                                    haveInvite: inviteClock.InviteShown,
+                                    tunnelHost: tunnelServer);
+
+        if (read.Meaning == LineMeaning.TheirRecording)
+        {
+            TheirRecordingLanded();
+            return;
+        }
+
+        if (read.Meaning == LineMeaning.TheirLog)
+        {
+            TheirLogLanded();
+            return;
+        }
+
         if (!Play.ScreenMayChange(halted, flow.Current == Stage.Start && !driver.AnythingRunning))
         {
             return;
         }
 
-        var read = NetplayLine.Read(line, flow.Hosting && driver.AnythingRunning,
-                                    haveInvite: (Find<TextBox>("ShareBox").Text ?? "").Length > 0,
-                                    tunnelHost: tunnelServer);
-
         if (NetplayLine.ProvesTheLink(read.Meaning))
         {
             LinkRestored();
+        }
+
+        if (NetplayLine.ProvesTheOpponentIsHere(read.Meaning, BothConfirmedAtSetUp()))
+        {
+            peerLeftAt = null;
         }
 
         switch (read.Meaning)
@@ -637,7 +853,7 @@ public partial class PlayPanel
                     Find<TextBox>("ShareBox").Text = $"{address} {roomId} {driver.RoomCode}";
                     Find<Button>("CopyInviteButton").IsEnabled = true;
                     Go(Stage.HostInvite);
-                    WaitForJoin();
+                    InviteMade();
                     driver.Spawn(Play.LobbyArgs(hosting: true, driver.RoomCode, roomId, address,
                                                 Settings.Read().Name, chosen?.Uuid ?? "", hostBoard,
                                                 ChosenVictoryPoints(), ChosenDraftPoints(), firstPlayer,
@@ -649,41 +865,52 @@ public partial class PlayPanel
             case LineMeaning.PortInUse:
                 {
                     SayBad("That port is already in use",
-                           "Something else is holding it, usually a relay still running from an earlier try. "
-                           + "Press Stop, then host again.");
+                           "Press Stop, then create the invite again.");
                     return;
                 }
 
             case LineMeaning.Crashed:
                 {
-                    SayBad("Something went wrong",
-                           $"{LogWhy()} Press Stop before trying again.");
+                    if (Play.RingsOnHalt(halted))
+                    {
+                        Attention.Raise(TopLevel.GetTopLevel(this) as Window);
+                    }
+
+                    halted = true;
+                    StopWithReport("Something went wrong", "Press Stop before trying again.", ask: true,
+                                   swapComing: false);
                     return;
                 }
 
             case LineMeaning.TunnelDown:
                 {
-                    SayBad("Could not open a public address",
-                           $"The relay could not be reached. {LogWhy()} Press Stop and try again.");
+                    SayBad("Could not create the invite",
+                           "Press Stop and try again.");
                     return;
                 }
 
             case LineMeaning.Halt:
                 {
+                    if (Play.RingsOnHalt(halted))
+                    {
+                        Attention.Raise(TopLevel.GetTopLevel(this) as Window);
+                    }
+
                     halted = true;
 
                     Ink("PlayStatus", Palette.SlateDark.Bad);
                     Find<TextBlock>("PlayStatus").Text = Play.HaltStatus;
                     Find<Border>("PlaySyncDot").Classes.Remove("on");
 
-                    if (read.Inactive)
+                    if (read.UnknownGameBuild)
                     {
-                        var (inactiveStep, inactiveDetail) = Play.InactiveText();
-                        SayBad(inactiveStep, inactiveDetail);
+                        var (updatedStep, updatedDetail) = Release.GameUpdatedText(UpdateCheck.Ours(),
+                                                                                   UpdateCheck.Newest);
+                        SayBad(updatedStep, updatedDetail);
                         return;
                     }
 
-                    if (Play.ShowsVersionScreen(read.DifferentVersions, playSpawned))
+                    if (Play.ShowsRefusalScreen(read.DifferentVersions, playSpawned))
                     {
                         var (versionsStep, versionsDetail) = Release.DifferentVersionsText(UpdateCheck.Ours(),
                                                                                            UpdateCheck.Newest);
@@ -691,23 +918,29 @@ public partial class PlayPanel
                         return;
                     }
 
-                    if (Play.ShowsVersionScreen(read.DifferentGameBuilds, playSpawned))
+                    if (Play.ShowsRefusalScreen(read.DifferentGameBuilds, playSpawned))
                     {
                         var (buildsStep, buildsDetail) = Play.GameBuildsText();
                         SayBad(buildsStep, buildsDetail);
                         return;
                     }
 
-                    if (read.PlayerLeft)
+                    if (read.GameClosed)
                     {
-                        var (leftStep, leftDetail) = Play.LeftText(read.LeftHere);
-                        SayBad(leftStep, leftDetail);
+                        var (closedStep, closedDetail) = Play.ClosedText(read.ClosedHere);
+                        StopWithReport(closedStep, closedDetail, ask: false, swapComing: playSpawned);
                         return;
                     }
 
-                    var halt = Play.HaltText(read.Disagreement);
-                    var reported = haltReport.For(driver.Generation, SaveReport);
-                    SayBad(halt.Headline, $"{halt.Detail} {reported}".TrimEnd(), detailToo: true);
+                    if (read.PlayerLeft)
+                    {
+                        var (leftStep, leftDetail) = Play.LeftText(read.LeftHere);
+                        StopWithReport(leftStep, leftDetail, ask: false, swapComing: playSpawned);
+                        return;
+                    }
+
+                    var halt = Play.StopText(read.SetupsDiffer, read.Disagreement);
+                    StopWithReport(halt.Headline, halt.Detail, ask: true, swapComing: playSpawned);
                     return;
                 }
 
@@ -722,16 +955,16 @@ public partial class PlayPanel
                         return;
                     }
 
-                    Say("You are both ready. Enter the challenge now",
-                        "Open the challenge and place your machines. Do not back out of the list on the way in.");
+                    Say("You are both ready",
+                        "Open the challenge and place your machines. Do not back out of the challenge list.");
                     Ink("StepLine", Palette.SlateDark.Good);
                     return;
                 }
 
             case LineMeaning.PeerStillInSetup:
                 {
-                    StartWaiting("Waiting for your opponent to finish setting up",
-                                 "Do not enter the challenge until this screen says you are both ready.",
+                    StartWaiting(Play.PeerInSetupHeadline,
+                                 Play.DoNotEnterYet,
                                  technical: false);
                     return;
                 }
@@ -752,7 +985,7 @@ public partial class PlayPanel
                         return;
                     }
 
-                    if (Play.OpponentAheadDetail(flow.Current) is not { } detail)
+                    if (Play.OpponentAheadDetail(flow.Current, setupFailed) is not { } detail)
                     {
                         return;
                     }
@@ -762,7 +995,7 @@ public partial class PlayPanel
                         if (!RetitleWait(Play.OpponentAheadHeadline))
                         {
                             Say(Play.OpponentAheadHeadline,
-                                $"Your setup is still being written here. {Play.DoNotEnterYet}");
+                                $"Your side is still setting up. {Play.DoNotEnterYet}");
                         }
 
                         return;
@@ -776,8 +1009,6 @@ public partial class PlayPanel
                 {
                     var derived = read.Code!;
 
-                    peerLeftAt = null;
-
                     if (playSpawned)
                     {
                         return;
@@ -788,6 +1019,8 @@ public partial class PlayPanel
                         return;
                     }
 
+                    inviteClock.Heard(Play.InviteClock.Event.KeyedPeerHere, DateTime.UtcNow);
+
                     if (fingerprint.Code.Length > 0 && derived != fingerprint.Code)
                     {
                         pendingCode = derived;
@@ -795,6 +1028,7 @@ public partial class PlayPanel
                     }
 
                     peerHere = true;
+                    peerLeftAt = null;
 
                     fingerprint.Take(derived);
                     ShowSafetyCode(fingerprint.Code, warning: false, flow.Hosting);
@@ -813,7 +1047,7 @@ public partial class PlayPanel
 
                     if (chosen is not null)
                     {
-                        Say("Choose your army", "Your opponent is ready. Pick yours and press Use this army.");
+                        Say("Choose your army", "Your opponent has chosen theirs.");
                         return;
                     }
 
@@ -838,9 +1072,31 @@ public partial class PlayPanel
                             EnterArmyScreen();
                             if (chosen is not null)
                             {
-                                Say("Choose your army", "Your opponent is ready. Pick yours and press Use this army.");
+                                Say("Choose your army", "Your opponent has chosen theirs.");
                             }
                         }
+                    }
+
+                    return;
+                }
+
+            case LineMeaning.ArmyDoesNotFit:
+                {
+                    var message = Play.ArmyDoesNotFit(read.Machines, read.PlacingSquares)
+                                  ?? Play.ArmyDoesNotFitHere;
+                    armySent = false;
+                    StopWaiting();
+                    EnterArmyScreen();
+                    SayBad("That army does not fit this board", message);
+                    return;
+                }
+
+            case LineMeaning.TheirName:
+                {
+                    opponentName = read.Name;
+                    if (flow.Current == Stage.HostInvite || flow.Current == Stage.JoinWait)
+                    {
+                        Say(Play.JoinedHeadline(opponentName), "");
                     }
 
                     return;
@@ -862,23 +1118,7 @@ public partial class PlayPanel
 
             case LineMeaning.BothReady:
                 {
-                    var state = Play.SafetyScreenState(fingerprint.Code);
-                    ShowSafetyCode(state.Text, state.Warning, flow.Hosting);
-                    Go(Stage.Safety);
-
-                    if (state.Warning)
-                    {
-                        SayBad("No safety code appeared", state.Note);
-                    }
-
-                    Find<TextBox>("TypedCode").IsVisible = !state.Warning;
-                    Find<Button>("CodeMatchesButton").IsEnabled = state.Warning;
-                    SetContinueLabel(state.Press);
-                    if (!state.Warning)
-                    {
-                        CheckTypedCode();
-                    }
-
+                    OpenSafetyScreen();
                     Reflow();
                     return;
                 }
@@ -895,7 +1135,7 @@ public partial class PlayPanel
                     if (flow.Current == Stage.Safety)
                     {
                         Say("Compare safety codes",
-                            "Your opponent has confirmed. Type the four they read to you.");
+                            "Your opponent has confirmed. Type the code they read to you.");
                     }
 
                     return;
@@ -914,8 +1154,9 @@ public partial class PlayPanel
                         if (flow.Hosting && flow.Current == Stage.HostInvite)
                         {
                             peerHere = false;
+                            inviteClock.Heard(Play.InviteClock.Event.PeerLeft, DateTime.UtcNow);
                             WaitForJoin();
-                            ToastRail.Show(ToastKind.Info, "Your opponent left. The same invite still works if they join again.");
+                            ToastRail.Show(ToastKind.Info, "Your opponent left. The same invite works if they join again.");
                         }
 
                         return;
@@ -929,10 +1170,14 @@ public partial class PlayPanel
             case LineMeaning.PeerStartedOver:
                 {
                     peerLeftAt = null;
+                    inviteClock.Heard(Play.InviteClock.Event.KeyedPeerHere, DateTime.UtcNow);
                     if (pendingCode is { } code)
                     {
                         fingerprint.Reset();
                         fingerprint.Take(code);
+                        codeShown = false;
+                        DrawEye();
+                        DrawTypedCells();
                         ShowSafetyCode(fingerprint.Code, warning: false, flow.Hosting);
                         pendingCode = null;
                     }
@@ -945,7 +1190,7 @@ public partial class PlayPanel
                     if (writing)
                     {
                         SayBad("Your opponent started over",
-                               "Your setup is already written here, so this match cannot go on. Press Stop on both PCs and start again.");
+                               "This match cannot go on. Press Stop on both PCs and start again.");
                         return;
                     }
 
@@ -964,7 +1209,7 @@ public partial class PlayPanel
 
                     ResetSafetyInputs();
                     ShowSafetyCode(fingerprint.Code, warning: false, flow.Hosting);
-                    Say("The safety code changed", "Compare the code on your screens again, then press Continue.");
+                    Say("The safety code changed", "Compare the new codes, then press Continue.");
                     return;
                 }
 
@@ -978,7 +1223,8 @@ public partial class PlayPanel
                 {
                     Find<Button>("WriteButton").IsEnabled = true;
                     writing = false;
-                    SayBad("The setup did not go into the game", line, detailToo: true);
+                    setupFailed = true;
+                    SayBad("The setup did not go into the game", Play.WriteFailedText(line));
                     return;
                 }
 
@@ -990,7 +1236,7 @@ public partial class PlayPanel
                     }
 
                     peerHere = true;
-                    Say("Your opponent has joined", "");
+                    Say(Play.JoinedHeadline(opponentName), "");
                     Ink("StepLine", Palette.SlateDark.Good);
                     return;
                 }
@@ -1030,8 +1276,10 @@ public partial class PlayPanel
                         peerLeftAt = null;
                         pausedWait = null;
                         linkDowns = Play.LinkDownAfter;
-                        SayBad("Your opponent stopped",
-                               "They pressed Stop or closed Strikers. Press Stop and start again.");
+                        halted = true;
+                        StopWithReport("Your opponent stopped",
+                                       "Press Stop and start again.",
+                                       ask: false, swapComing: false);
                         return;
                     }
 
@@ -1048,7 +1296,7 @@ public partial class PlayPanel
             case LineMeaning.InSync:
                 {
                     Ink("PlayStatus", Palette.SlateDark.Good);
-                    Find<TextBlock>("PlayStatus").Text = "Both boards agree.";
+                    Find<TextBlock>("PlayStatus").Text = "The games are in sync.";
                     Find<Border>("PlaySyncDot").Classes.Add("on");
                     return;
                 }

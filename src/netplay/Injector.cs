@@ -6,6 +6,42 @@ internal sealed class Injector(string liveProbePath, bool armed)
 {
     public string? LastCommand { get; private set; }
 
+    public int LastExit { get; internal set; }
+
+    internal const int NoExit = -1;
+
+    internal const int GateRefused = 8;
+
+    internal const string GateHaltText =
+        "a turn from the other side was stopped part way, at an action this game could not play or could not " +
+        "check.\n    The actions before it are already on this board. Do not play on: compare both boards before " +
+        "restarting.";
+
+    internal static string? GateSummaryOf(IEnumerable<string> lines)
+    {
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("gate: ", StringComparison.Ordinal))
+            {
+                return trimmed;
+            }
+        }
+
+        return null;
+    }
+
+    internal static string HaltReason(int probeExit, int actions)
+    {
+        if (probeExit == GateRefused)
+        {
+            return GateHaltText;
+        }
+
+        return $"injection failed on a turn of {actions} action(s), this board may hold only part of it.\n" +
+               "    Do not play on: compare both boards before restarting.";
+    }
+
     internal static string? GameTimeOf(IEnumerable<string> lines)
     {
         foreach (var line in lines)
@@ -20,18 +56,14 @@ internal sealed class Injector(string liveProbePath, bool armed)
         return null;
     }
 
-    public Task<bool> Apply(Move m, CancellationToken token)
+    public Task<bool> Apply(IReadOnlyList<Move> turn)
     {
-        return Apply([m], token);
+        return Apply(turn, final: false);
     }
 
-    public Task<bool> Apply(IReadOnlyList<Move> turn, CancellationToken token)
+    public async Task<bool> Apply(IReadOnlyList<Move> turn, bool final)
     {
-        return Apply(turn, final: false, token);
-    }
-
-    public async Task<bool> Apply(IReadOnlyList<Move> turn, bool final, CancellationToken token)
-    {
+        LastExit = NoExit;
         if (turn.Count == 0)
         {
             return true;
@@ -143,17 +175,21 @@ internal sealed class Injector(string liveProbePath, bool armed)
         var started = Stopwatch.StartNew();
 
         await proc.WaitForExitAsync(CancellationToken.None);
+        LastExit = proc.ExitCode;
 
         if (proc.ExitCode == 0)
         {
             string? gameTime;
+            string? gate;
             lock (lines)
             {
                 gameTime = GameTimeOf(lines);
+                gate = GateSummaryOf(lines);
             }
 
             Console.WriteLine($"    applied: {turn.Count} action(s) in {started.Elapsed.TotalSeconds:0.0} s" +
-                              (gameTime is null ? "" : $", {gameTime} of game time"));
+                              (gameTime is null ? "" : $", {gameTime} of game time") +
+                              (gate is null ? "" : $", {gate}"));
             return true;
         }
 

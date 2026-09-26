@@ -6,12 +6,24 @@ internal static class UpdateCheck
 
     private static string? newest;
 
+    private static string? page;
+
     public static string? Newest
     {
         get
         {
             return Volatile.Read(ref newest);
         }
+    }
+
+    public static string Page()
+    {
+        return Volatile.Read(ref page) ?? PageFor(onNexus: ModId() > 0);
+    }
+
+    private static string PageFor(bool onNexus)
+    {
+        return onNexus ? Release.PageUrl(ModId()) : Release.ReleasesPageUrl(Release.GitHubRepo);
     }
 
     public static string? Ours()
@@ -35,14 +47,25 @@ internal static class UpdateCheck
             return (forced, $"update check: {ShowDoor} says the newest is {forced ?? "unreadable"}");
         }
 
-        if (modId <= 0)
+        var agent = $"Strikers/{Ours() ?? "0"}";
+
+        string? onNexus = null;
+        var note = "";
+        if (modId > 0)
         {
-            return (null, "");
+            (onNexus, note) = await Release.FetchNewestAsync(Release.NexusApi, modId, agent,
+                                                             Release.AnswerWithin, Release.QuietWithin);
         }
 
-        var (found, note) = await Release.FetchNewestAsync(Release.NexusApi, modId, $"Strikers/{Ours() ?? "0"}",
-                                                           Release.AnswerWithin, Release.QuietWithin);
+        var (onGitHub, tagNote) = await Release.FetchNewestTagAsync(Release.GitHubApi, Release.GitHubRepo, agent,
+                                                                   Release.AnswerWithin, Release.QuietWithin);
+
+        var takeGitHub = Release.Newer(onGitHub, onNexus) || onNexus is null;
+        var found = takeGitHub ? onGitHub : onNexus;
         Volatile.Write(ref newest, found);
-        return (found, note);
+        Volatile.Write(ref page, PageFor(onNexus: !takeGitHub));
+
+        var both = note.Length > 0 ? $"{note}, {tagNote}" : tagNote;
+        return (found, both);
     }
 }

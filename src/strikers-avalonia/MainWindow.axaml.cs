@@ -32,6 +32,8 @@ public partial class MainWindow : Window
 
         Closing += (_, _) => this.FindControl<PlayPanel>("PlayFlow")!.ShutDown();
 
+        Activated += (_, _) => Attention.Settle(this);
+
         var play = this.FindControl<PlayPanel>("PlayFlow")!;
         var boards = this.FindControl<BoardsPanel>("BoardEditor")!;
         boards.Changed += play.RefreshBoards;
@@ -214,6 +216,7 @@ public partial class MainWindow : Window
 
         double ContentHeightAt(double width)
         {
+            tint.Width = double.NaN;
             tint.Height = double.NaN;
 
             foreach (var layoutable in tint.GetVisualDescendants().OfType<Avalonia.Layout.Layoutable>())
@@ -246,14 +249,36 @@ public partial class MainWindow : Window
 
         var centred = false;
 
+        var gliding = false;
+
+        void PinTint(double width, double height)
+        {
+            tint.Width = width - 2;
+            tint.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left;
+            tint.Height = height - 2;
+            tint.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top;
+        }
+
+        void FreeTint()
+        {
+            tint.Width = double.NaN;
+            tint.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch;
+            tint.Height = double.NaN;
+            tint.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch;
+        }
+
         void GlideToCentre()
         {
             var glide = ++glides;
-            Freeze();
+            if (!gliding)
+            {
+                Freeze();
+                gliding = true;
+            }
+
             var height = ContentHeight();
 
-            tint.Height = height - 2;
-            tint.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top;
+            PinTint(FocusWidth, height);
             playPanel.Width = FocusWidth;
             playPanel.Height = height;
             playPanel.Margin = new Thickness(Math.Max(6, (home.Bounds.Width - FocusWidth) / 2),
@@ -266,8 +291,8 @@ public partial class MainWindow : Window
                     return;
                 }
 
-                tint.Height = double.NaN;
-                tint.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch;
+                gliding = false;
+                FreeTint();
                 playPanel.Transitions = null;
                 playPanel.Margin = new Thickness(6);
                 playPanel.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center;
@@ -364,14 +389,14 @@ public partial class MainWindow : Window
 
             var back = ++glides;
             centred = false;
+            gliding = false;
             Freeze();
 
-            tint.Height = double.NaN;
-            tint.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch;
-
             var restWidth = (home.Bounds.Width * 0.25) - 12;
+            var restHeight = ContentHeightAt(restWidth);
+            PinTint(restWidth, restHeight);
             playPanel.Width = restWidth;
-            playPanel.Height = ContentHeightAt(restWidth);
+            playPanel.Height = restHeight;
             playPanel.Margin = new Thickness(6);
 
             foreach (var shelf in shelves)
@@ -388,6 +413,7 @@ public partial class MainWindow : Window
                     return;
                 }
 
+                FreeTint();
                 playPanel.Transitions = null;
                 playPanel.Width = double.NaN;
                 playPanel.Height = double.NaN;
@@ -703,8 +729,6 @@ public partial class MainWindow : Window
 
     private Bitmap? frost;
 
-    private string? backdropPath;
-
     private static Bitmap MakeFrost(string path, bool legible)
     {
         using var input = SKBitmap.Decode(path);
@@ -821,7 +845,6 @@ public partial class MainWindow : Window
             try
             {
                 picture.Source = new Bitmap(found);
-                backdropPath = found;
                 frost = MakeFrost(found, legible: true);
                 FrostPanels();
                 return;

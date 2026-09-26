@@ -26,33 +26,48 @@ public static class TunnelDns
             return (host, null);
         }
 
-        var viaHttps = await OverHttpsAsync(host, token);
+        var viaHttps = (await OverHttpsAsync(host, token)).FirstOrDefault();
         if (viaHttps is not null && await ReachableAsync(viaHttps, token))
         {
-            var system = await SystemAnswerAsync(host, token);
-            var note = system is null
-                ? $"Your network could not look up {host}, so Strikers found it another way ({viaHttps}). "
-                  + "Nothing for you to fix."
-                : $"Your network answered {host} with {system}, which is not the real server. Strikers "
-                  + $"found the right one ({viaHttps}) and is using it. Nothing for you to fix.";
-            return (viaHttps, note);
+            var system = (await SystemAnswersAsync(host, token)).FirstOrDefault();
+            return (viaHttps, Note(host, viaHttps, system));
         }
 
         return (host, $"Strikers could not reach {host} by any route. Your network may be blocking it "
                     + "outright, or the server may be down.");
     }
 
-    private static async Task<string?> SystemAnswerAsync(string host, CancellationToken token)
+    internal static string Note(string host, string found, string? systemAnswer)
+    {
+        if (systemAnswer is null)
+        {
+            return $"Your network could not look up {host}, so Strikers found it another way ({found}). "
+                   + "Nothing for you to fix.";
+        }
+
+        return $"Your network answered {host} with an address that is not the real server. Strikers "
+               + $"found the right one ({found}) and is using it. Nothing for you to fix.";
+    }
+
+    public static async Task<IReadOnlyCollection<string>> AnswersAsync(string host, CancellationToken token = default)
+    {
+        var system = await SystemAnswersAsync(host, token);
+        var viaHttps = await OverHttpsAsync(host, token);
+        return [.. system.Concat(viaHttps).Distinct(StringComparer.Ordinal)];
+    }
+
+    private static async Task<List<string>> SystemAnswersAsync(string host, CancellationToken token)
     {
         try
         {
             var addresses = await System.Net.Dns.GetHostAddressesAsync(host, token);
-            return addresses.FirstOrDefault(a => a.AddressFamily
-                == System.Net.Sockets.AddressFamily.InterNetwork)?.ToString();
+            return [.. addresses.Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                                .Select(a => a.ToString())];
         }
-        catch (Exception e) when (e is System.Net.Sockets.SocketException or ArgumentException)
+        catch (Exception e) when (e is System.Net.Sockets.SocketException or ArgumentException
+                                      or OperationCanceledException)
         {
-            return null;
+            return [];
         }
     }
 
@@ -85,10 +100,40 @@ public static class TunnelDns
         ];
     }
 
-    private static async Task<string?> OverHttpsAsync(string host, CancellationToken token)
+    internal static List<string> AnswerAddresses(string text)
+    {
+        var found = new List<string>();
+        try
+        {
+            if (JsonNode.Parse(text) is not JsonObject reply || reply["Answer"] is not JsonArray answers)
+            {
+                return found;
+            }
+
+            foreach (var answer in answers)
+            {
+                if (answer?["type"]?.GetValue<int>() == 1
+                    && answer["data"]?.GetValue<string>() is { } address
+                    && System.Net.IPAddress.TryParse(address, out var parsed)
+                    && parsed.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    found.Add(parsed.ToString());
+                }
+            }
+
+            return found;
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
+
+    private static async Task<List<string>> OverHttpsAsync(string host, CancellationToken token)
     {
         foreach (var url in QueryUrls(host))
         {
+            string text;
             try
             {
                 using var http = new HttpClient
@@ -97,28 +142,21 @@ public static class TunnelDns
                     MaxResponseContentBufferSize = MaxAnswerBytes,
                 };
                 http.DefaultRequestHeaders.Add("Accept", "application/dns-json");
-                var text = await http.GetStringAsync(url, token);
-                if (JsonNode.Parse(text) is not JsonObject reply || reply["Answer"] is not JsonArray answers)
-                {
-                    continue;
-                }
-
-                foreach (var answer in answers)
-                {
-                    if (answer?["type"]?.GetValue<int>() == 1
-                        && answer["data"]?.GetValue<string>() is { } address
-                        && System.Net.IPAddress.TryParse(address, out _))
-                    {
-                        return address;
-                    }
-                }
+                text = await http.GetStringAsync(url, token);
             }
-            catch (Exception e) when (e is HttpRequestException or TaskCanceledException
-                                          or System.Text.Json.JsonException or InvalidOperationException)
+            catch (Exception e) when (e is HttpRequestException or OperationCanceledException
+                                          or InvalidOperationException)
             {
+                continue;
+            }
+
+            var found = AnswerAddresses(text);
+            if (found.Count > 0)
+            {
+                return found;
             }
         }
 
-        return null;
+        return [];
     }
 }

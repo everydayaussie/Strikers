@@ -17,6 +17,46 @@ public static class Selftest
         return $@"Local\Strikers-selftest-{what}-{Environment.ProcessId}";
     }
 
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, int revision,
+                                                                                    out IntPtr descriptor, IntPtr size);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateEventW(ref SecurityAttributes attributes, bool manualReset, bool initialState,
+                                              string name);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public int Length;
+        public IntPtr Descriptor;
+        public int Inherit;
+    }
+
+    private static IntPtr DeniedClaim(string name)
+    {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW("D:(D;;GA;;;WD)", 1, out var descriptor, IntPtr.Zero))
+        {
+            return IntPtr.Zero;
+        }
+
+        var attributes = new SecurityAttributes
+        {
+            Length = Marshal.SizeOf<SecurityAttributes>(),
+            Descriptor = descriptor,
+            Inherit = 0,
+        };
+        var handle = CreateEventW(ref attributes, true, false, name);
+        LocalFree(descriptor);
+        return handle;
+    }
+
     public static int Run(Action<Action<string, bool>>? uiChecks = null)
     {
         AttachConsole(-1);
@@ -42,40 +82,40 @@ public static class Selftest
         Console.WriteLine();
 
         const string nonce = "a1b2c3d4e5f6a7b8";
-        var plain = Play.ParseInvite($"bore.pub:12345 {nonce} GATE01");
+        var plain = Play.ParseInvite($"bore.pub:12345 {nonce} GATE23");
         Check("the invite we generate reads back",
-              plain is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE01" });
+              plain is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE23" });
 
         Check("the three parts may arrive in any order",
-              Play.ParseInvite($"GATE01 bore.pub:12345 {nonce}")
-                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE01" });
+              Play.ParseInvite($"GATE23 bore.pub:12345 {nonce}")
+                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE23" });
 
         Check("a line break between them still reads",
-              Play.ParseInvite($"bore.pub:12345 {nonce}\nGATE01")
-                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE01" });
+              Play.ParseInvite($"bore.pub:12345 {nonce}\nGATE23")
+                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE23" });
 
         Check("a lower-case code is normalised, since codes are read aloud",
-              Play.ParseInvite($"bore.pub:12345 {nonce} gate01") is { Code: "GATE01" });
+              Play.ParseInvite($"bore.pub:12345 {nonce} gate23") is { Code: "GATE23" });
 
         Check("a numeric address reads",
-              Play.ParseInvite($"192.0.2.10:47801 {nonce} ABC123") is { Address: "192.0.2.10:47801", Code: "ABC123" });
+              Play.ParseInvite($"192.0.2.10:47801 {nonce} ABC234") is { Address: "192.0.2.10:47801", Code: "ABC234" });
 
         Check("a pasted command line does not hand back a noise word as the room code",
-              Play.ParseInvite($"netplay --server bore.pub:12345 --room-id {nonce} --join GATE01")
-                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE01" });
+              Play.ParseInvite($"netplay --server bore.pub:12345 --room-id {nonce} --join GATE23")
+                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE23" });
 
         Check("chatty wording around the invite still reads",
-              Play.ParseInvite($"hey join me on server bore.pub:12345 room {nonce} GATE01 thanks")
-                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE01" });
+              Play.ParseInvite($"hey join me on server bore.pub:12345 room {nonce} GATE23 thanks")
+                  is { Address: "bore.pub:12345", RoomId: nonce, Code: "GATE23" });
 
         Check("an invite with no address at all is refused rather than half-read",
-              Play.ParseInvite($"{nonce} GATE01") is { Address: null, Code: null });
+              Play.ParseInvite($"{nonce} GATE23") is { Address: null, Code: null });
 
         Check("empty text is refused",
               Play.ParseInvite("") is { Address: null });
 
         Check("an invite with no routing id is refused rather than silently unroutable",
-              Play.ParseInvite("bore.pub:12345 GATE01") is { RoomId: null });
+              Play.ParseInvite("bore.pub:12345 GATE23") is { RoomId: null });
 
         var genNonce = Play.NewRoomId();
         var genCode = Play.NewRoomCode();
@@ -83,12 +123,63 @@ public static class Selftest
         Check("a freshly generated invite round-trips through the parser",
               gen.Address == "bore.pub:12345" && gen.RoomId == genNonce && gen.Code == genCode);
 
-        Check("a real safety code lets the player confirm a match, with nothing to warn about",
-              Play.SafetyScreenState("A1B2C3D4") is { Warning: false, Note: "", Press: "Continue" });
+        Check("an invite whose port is 0 or past 65535 is not an invite",
+              Play.ParseInvite($"bore.pub:70000 {nonce} GATE23") is { Address: null }
+              && Play.ParseInvite($"bore.pub:99999 {nonce} GATE23") is { Address: null }
+              && Play.ParseInvite($"bore.pub:00 {nonce} GATE23") is { Address: null }
+              && Play.ParseInvite($"bore.pub:65535 {nonce} GATE23") is { Address: "bore.pub:65535" }
+              && Play.ParseInvite($"bore.pub:10 {nonce} GATE23") is { Address: "bore.pub:10" });
 
-        Check("no safety code shows a warning that says the link is not verified, on a press that says so",
-              Play.SafetyScreenState("") is { Warning: true, Text: "not shown", Press: "Continue unverified" } noCode
-              && noCode.Note.Contains("not verified"));
+        Check("an invite's port is all of its digits, so bore.pub:100000 is not bore.pub:10000",
+              Play.ParseInvite($"bore.pub:100000 {nonce} GATE23") is { Address: null }
+              && Play.ParseInvite($"bore.pub:655350 {nonce} GATE23") is { Address: null }
+              && Play.ParseInvite($"bore.pub:43512, {nonce} GATE23") is { Address: "bore.pub:43512" });
+
+        Check("an invite's code is only the six characters Strikers makes, so HALT or REFUSED is never a code",
+              Play.ParseInvite($"bore.pub:12345 {nonce} HALT") is { Address: "bore.pub:12345", Code: null }
+              && Play.ParseInvite($"bore.pub:12345 {nonce} REFUSED") is { Code: null }
+              && Play.ParseInvite($"bore.pub:12345 {nonce} HALT23") is { Code: null }
+              && Play.ParseInvite($"bore.pub:12345 {nonce} GATE01") is { Code: null }
+              && Play.ParseInvite($"bore.pub:12345 {nonce} K7Q4M2") is { Code: "K7Q4M2" }
+              && Play.ParseInvite($"bore.pub:12345 {nonce} k7q4m2") is { Code: "K7Q4M2" });
+
+        Check("an invite is joined only at the tunnel's own name, or at an address this PC's own lookup of it gave, on a port from 1 to 65535",
+              Play.PinInvite("bore.pub:43512", null) == Play.InvitePin.Accept
+              && Play.PinInvite("BORE.PUB:43512", null) == Play.InvitePin.Accept
+              && Play.PinInvite("bore.pub:70000", null) == Play.InvitePin.Refuse
+              && Play.PinInvite("bore.pub:0", null) == Play.InvitePin.Refuse
+              && Play.PinInvite("evil.example:43512", null) == Play.InvitePin.Refuse
+              && Play.PinInvite("bore.pub.evil.example:43512", null) == Play.InvitePin.Refuse
+              && Play.PinInvite("localhost:43512", null) == Play.InvitePin.Refuse
+              && Play.PinInvite("159.223.110.159:43512", null) == Play.InvitePin.LookUp
+              && Play.PinInvite("159.223.110.159:43512", ["10.255.255.254", "159.223.110.159"]) == Play.InvitePin.Accept
+              && Play.PinInvite("192.0.2.10:43512", ["159.223.110.159"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("159.223.110.159:43512", []) == Play.InvitePin.Refuse
+              && Play.PinInvite("0159.223.110.159:43512", ["159.223.110.159"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("159.223.110.159:70000", ["159.223.110.159"]) == Play.InvitePin.Refuse);
+
+        Check("an invite at a private, loopback or link-local address is refused before any lookup, even one this PC's lookup gave",
+              Play.PinInvite("10.255.255.254:43512", null) == Play.InvitePin.Refuse
+              && Play.PinInvite("10.255.255.254:43512", ["10.255.255.254"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("127.0.0.1:43512", ["127.0.0.1"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("0.0.0.0:43512", ["0.0.0.0"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("192.168.255.254:43512", ["192.168.255.254"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("172.31.255.1:43512", ["172.31.255.1"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("169.254.1.1:43512", ["169.254.1.1"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("100.64.0.1:43512", ["100.64.0.1"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("255.255.255.255:43512", ["255.255.255.255"]) == Play.InvitePin.Refuse
+              && Play.PinInvite("172.32.0.1:43512", ["172.32.0.1"]) == Play.InvitePin.Accept
+              && Play.PinInvite("100.128.0.1:43512", ["100.128.0.1"]) == Play.InvitePin.Accept
+              && Play.PinInvite("11.0.0.1:43512", null) == Play.InvitePin.LookUp);
+
+        Check("a real safety code opens the compare with nothing to warn about",
+              Play.SafetyScreenState("A1B2C3D4") is { Warning: false, Note: "" });
+
+        Check("D-277: no safety code warns, sends the player to Stop, and nothing typed goes on",
+              Play.SafetyScreenState("") is { Warning: true } noCode
+              && noCode.Note.Contains("Press Stop") && !noCode.Note.Contains(';')
+              && !Play.SafetyTypedState("", "", hosting: true).Continue
+              && !Play.SafetyTypedState("", "0000", hosting: false).Continue);
 
         const string fingerprint = "1E1833535E873CBD";
 
@@ -100,23 +191,30 @@ public static class Selftest
               Play.SafetyReadOut(fingerprint, hosting: true) == Play.SafetyTyped(fingerprint, hosting: false)
               && Play.SafetyReadOut(fingerprint, hosting: false) == Play.SafetyTyped(fingerprint, hosting: true));
 
-        Check("typing the opponent's four continues, and the press says the codes match",
-              Play.SafetyTypedState(fingerprint, "3CBD", hosting: false) is { Continue: true, Good: true, Press: "Codes match, continue" }
+        Check("typing the opponent's four continues and marks the four as matching",
+              Play.SafetyTypedState(fingerprint, "3CBD", hosting: false) is { Continue: true, Good: true, Complete: true }
               && Play.SafetyTypedState(fingerprint, "1E18", hosting: true) is { Continue: true, Good: true });
 
         Check("case and spacing do not matter, since the code is read aloud",
-              Play.SafetyTypedState(fingerprint, " 3cbd ", hosting: false).Continue);
+              Play.SafetyTypedState(fingerprint, " 3cbd ", hosting: false).Continue
+              && Play.SafetyTypedState(fingerprint, "3c bd", hosting: false).Continue);
 
         var mismatch = Play.SafetyTypedState(fingerprint, "3CBE", hosting: false);
-        Check("a code that does not match refuses to continue and the press says the codes differ",
-              mismatch is { Continue: false, Good: false, Press: "Codes differ" });
+        Check("four that do not match refuse to continue and mark the four as a miss",
+              mismatch is { Continue: false, Good: false, Complete: true });
 
         Check("typing the four shown on your own screen is refused, for the host and the guest alike",
-              Play.SafetyTypedState(fingerprint, "3CBD", hosting: true) is { Continue: false, Press: "Codes differ" }
-              && Play.SafetyTypedState(fingerprint, "1E18", hosting: false) is { Continue: false, Press: "Codes differ" });
+              Play.SafetyTypedState(fingerprint, "3CBD", hosting: true) is { Continue: false, Complete: true }
+              && Play.SafetyTypedState(fingerprint, "1E18", hosting: false) is { Continue: false, Complete: true });
 
         Check("a partly typed code neither continues, cries mismatch, nor counts",
-              Play.SafetyTypedState(fingerprint, "3C", hosting: false) is { Continue: false, Press: "Continue" });
+              Play.SafetyTypedState(fingerprint, "3C", hosting: false) is { Continue: false, Complete: false });
+
+        Check("the typed box keeps four hex characters in capitals and drops anything else",
+              Play.SafetyTypedClean(" 3c bd ") == "3CBD"
+              && Play.SafetyTypedClean("3CBD99") == "3CBD"
+              && Play.SafetyTypedClean("GHOST") == ""
+              && Play.SafetyTypedClean(null) == "");
 
         Check("nothing typed does not continue",
               Play.SafetyTypedState(fingerprint, "", hosting: false) is { Continue: false });
@@ -146,8 +244,9 @@ public static class Selftest
               Play.Fingerprint("  (read that fingerprint to the other player)") is null
               && Play.Fingerprint("  paired, seat 0") is null);
 
-        Check("the no-code placeholder is not a code",
-              Play.SafetyTypedState(Play.SafetyScreenState("").Text, "HOWN", hosting: false) is { Continue: false });
+        Check("the old no-code placeholder is not a code and warns like no code",
+              Play.SafetyScreenState("not shown").Warning
+              && Play.SafetyTypedState("not shown", "HOWN", hosting: false) is { Continue: false });
 
         var board = new StrikeBoard();
         board.Paint(0, 0, Terrain.Mountains);
@@ -295,6 +394,38 @@ public static class Selftest
         Check("the success line is not also read as a failure",
               Play.WriteFailed("  setup written") is false);
 
+        string[] refusals =
+        [
+            "  live-probe exited 1. Stopping, the later steps did not run, so the setup is incomplete. Do not start the match.",
+            "  not both ready yet, run status",
+            "  no challenge agreed",
+            "  their setup is incomplete, refusing to write a partial army",
+            "  your own setup is incomplete, run army and place first",
+            "  the game is still in a match, or on its victory screen. Press Continue in the game, "
+            + "stand on the challenge list, then Set up the match again. Nothing was written.",
+            "  nothing was written: both players must confirm the same safety code first",
+        ];
+        Check("D-288: every setup refusal reaches the screen as a plain sentence, never netplay's own line",
+              refusals.All(r => Play.WriteFailed(r))
+              && refusals.Select(Play.WriteFailedText).All(t => char.IsUpper(t[0]) && t.EndsWith('.')
+                                                                && !t.Contains(';') && !t.Contains("run ")
+                                                                && !t.Contains("live-probe") && !t.Contains("netplay"))
+              && Play.WriteFailedText(refusals[0]).StartsWith(Play.DoNotEnterYet)
+              && Play.WriteFailedText(refusals[5]).Contains("Press Continue in the game")
+              && char.IsUpper(Play.PartClosedHeadline[0]));
+
+        var noListLine = "  the game has no Machine Strike challenge list open, so the setup is incomplete. "
+                         + "Open the challenge list, then run write again.";
+        var otherStepLine = "  live-probe exited 2. Stopping, the later steps did not run, so the setup is incomplete. "
+                            + "Do not start the match.";
+        Check("a set-up that failed because the game is not on the challenge list at Salma's table says so and says to open it and press Set up the match again, while any other failed step still says to start again",
+              Play.WriteFailed(noListLine)
+              && Play.WriteFailedText(noListLine)
+                 == "Your game is not on the challenge list at Salma's Machine Strike table. Open it, then press Set up "
+                    + "the match again."
+              && Play.WriteFailed(otherStepLine)
+              && Play.WriteFailedText(otherStepLine) == $"{Play.DoNotEnterYet} Press Stop and start again.");
+
         Check("ordinary lobby chatter is neither",
               Play.WriteSucceeded("  paired, seat 0") is false
               && Play.WriteFailed("  paired, seat 0") is false
@@ -363,6 +494,28 @@ public static class Selftest
               && aheadOnSetUp.Contains("Set up the match") && aheadOnSetUp.Contains(Play.DoNotEnterYet)
               && Play.OpponentAheadDetail(Stage.ChooseArmy) is null
               && Play.OpponentAheadDetail(Stage.Playing) is null);
+
+        Check("after a failed set-up, the other player's --play arriving leaves the failure and what to do on screen, and before any failure the set-up screen still says to press Set up the match",
+              Play.OpponentAheadDetail(Stage.SetUp, setupFailed: true) is null
+              && Play.OpponentAheadDetail(Stage.SetUp, setupFailed: false) is { } beforeFailure
+              && beforeFailure.Contains("Set up the match")
+              && Play.OpponentAheadDetail(Stage.Safety, setupFailed: true) is { } onSafety
+              && onSafety.Contains("Continue"));
+
+        Check("the wait for the other player's set-up adds, after a minute, that their game may not be on the challenge list at Salma's table and what they do about it, and no other wait does",
+              Play.WaitingText(Play.PeerInSetupHeadline, Play.DoNotEnterYet, false,
+                               Play.PeerInSetupHintAfter - 1).Detail == Play.DoNotEnterYet
+              && Play.WaitingText(Play.PeerInSetupHeadline, Play.DoNotEnterYet, false,
+                                  Play.PeerInSetupHintAfter).Detail
+                 == Play.DoNotEnterYet + "\nYour opponent is taking a while. Their game may not be on the challenge "
+                    + "list at Salma's Machine Strike table. Ask them to open it and press Set up the match again."
+              && Play.WaitingText(Play.PeerInSetupHeadline, Play.DoNotEnterYet, false, 600).Step
+                 == Play.PeerInSetupHeadline
+              && Play.PeerInSetupHintAfter >= 45
+              && !Play.WaitingText("Waiting for your opponent to choose their army", "", false, 600).Detail
+                  .Contains("challenge list")
+              && !Play.WaitingText("Setting up the match", Play.DoNotEnterYet, true, 600, Play.WriteSlowAfter).Detail
+                  .Contains("challenge list"));
 
         Check("a lost link tells the player what to do, before and after a connection",
               Play.LinkDownAfter >= 2
@@ -436,6 +589,45 @@ public static class Selftest
 
         secondWindow.StopAll();
 
+        var swapClaim = TestClaim("swap");
+        var swapping = new MatchDriver(action => action(), claimName: swapClaim);
+        swapping.BeginStart();
+        var rivalHold = new EventWaitHandle(false, EventResetMode.ManualReset, swapClaim);
+        var swapFrom = swapping.Generation;
+        var refusedSwap = swapping.Restart(() => false);
+        var untouchedByRefusal = swapping.StillWanted(swapFrom) && swapping.HoldsMatchClaim;
+        Check("New invite stops nothing when the new invite cannot start",
+              !refusedSwap && untouchedByRefusal);
+
+        var swapped = swapping.Restart(() => true);
+        Check("New invite keeps this window's claim through the swap, never letting it go and taking it again",
+              swapped && swapping.Generation == swapFrom + 1 && swapping.HoldsMatchClaim);
+        rivalHold.Dispose();
+        swapping.StopAll();
+
+        var deniedName = TestClaim("denied");
+        var denied = DeniedClaim(deniedName);
+        var deniedWindow = new MatchDriver(action => action(), claimName: deniedName);
+        var deniedTold = "";
+        deniedWindow.Trouble += (headline, _) =>
+        {
+            deniedTold = headline;
+        };
+        bool deniedStarted;
+        try
+        {
+            deniedStarted = deniedWindow.BeginStart();
+        }
+        catch (Exception)
+        {
+            deniedStarted = true;
+        }
+
+        Check("a claim this window may not open reads as another Strikers running a match, never a crash",
+              denied != IntPtr.Zero && !deniedStarted && deniedTold.Contains("Another Strikers")
+              && deniedWindow.HoldsMatchClaim is false);
+        CloseHandle(denied);
+
         var generations = new MatchDriver(action => action(), claimName: TestClaim("generations"));
         generations.BeginStart();
         var firstAttempt = generations.Generation;
@@ -487,8 +679,21 @@ public static class Selftest
         Check("a line is judged by the attempt that spawned its process, not the one running when it arrives",
               lines.Count == 2);
 
+        var expiredUnder = straggler.Generation;
+        straggler.StopAllAndDropStragglers();
+        straggler.OnLine("both seats filled", expiredUnder);
+        Drain();
+        Check("an invite that runs out drops what its stopped relay had already said, so a join it seated reaches nothing",
+              lines.Count == 2 && straggler.HoldsMatchClaim is false && straggler.StillWanted(expiredUnder) is false);
+
         Check("once a halt is up, nothing but Stop changes the screen",
               !Play.ScreenMayChange(halted: true, startIdle: false) && Play.ScreenMayChange(halted: false, startIdle: false));
+
+        Check("an invite that runs out behind a halt leaves the halt's screen and its report button, and otherwise says to press New invite",
+              Play.InviteExpiredText(halted: true) is null
+              && Play.InviteExpiredText(halted: false) is { } expired
+              && expired.Detail.Contains("New invite") && !expired.Detail.Contains(';')
+              && !expired.Headline.Contains(';'));
 
         Check("a line reaching the Start screen with nothing running changes nothing on it",
               !Play.ScreenMayChange(halted: false, startIdle: true));
@@ -554,10 +759,10 @@ public static class Selftest
             tidyDir.Delete(recursive: true);
         }
 
-        var longestInvite = $"netplay --server bore.pub:12345 --room-id {new string('a', 24)} --join GATE01";
+        var longestInvite = $"netplay --server bore.pub:12345 --room-id {new string('a', 24)} --join GATE23";
         Check("the paste cap holds the longest legitimate invite",
               Play.MaxInviteLength >= longestInvite.Length &&
-              Play.ParseInvite(longestInvite) is { Address: "bore.pub:12345", Code: "GATE01" });
+              Play.ParseInvite(longestInvite) is { Address: "bore.pub:12345", Code: "GATE23" });
 
         var safety = new Play.SafetyCode();
         Check("the code starts empty until a fingerprint is taken", safety.Code.Length == 0);
@@ -678,6 +883,23 @@ public static class Selftest
               && joinPlay.SkipWhile(a => a != "--first").Skip(1).FirstOrDefault() == Play.FirstJoiner
               && Array.IndexOf(joinPlay, "--first") < Array.IndexOf(joinPlay, "--army"));
 
+        var namedPlay = Play.PlayArgs(hosting: false, "GATE01", "a1b2c3d4e5f6a7b8", "bore.pub:12345",
+                                      "EXAMPLE", army, sampleBinding, Play.FirstJoiner, "  --no-names  ");
+        Check("--play carries the army's name as hex after the army, so no army name can read as a flag, and a blank one is left out",
+              namedPlay.SkipWhile(a => a != Play.ArmyNameHexFlag).Skip(1).FirstOrDefault() == "2D2D6E6F2D6E616D6573"
+              && !namedPlay.Contains("--no-names")
+              && Array.IndexOf(namedPlay, "--army") < Array.IndexOf(namedPlay, Play.ArmyNameHexFlag)
+              && !Play.PlayArgs(hosting: true, "GATE01", "a1b2c3d4e5f6a7b8", "bore.pub:12345", "EXAMPLE", army,
+                                sampleBinding, Play.FirstHost, " ").Contains(Play.ArmyNameHexFlag)
+              && !hostPlay.Contains(Play.ArmyNameHexFlag)
+              && Play.ArmyNameHexFlag == "--army-name-hex");
+
+        var armyNameLine = "> netplay --play --army x " + Play.ArmyNameHexFlag + " 546F772074657374 --live-probe live-probe.exe";
+        Check("the army's name never reaches the log or a report, while the flag and what follows it stay readable",
+              !MatchDriver.ForTheRecord(armyNameLine).Contains("546F772074657374")
+              && MatchDriver.ForTheRecord(armyNameLine).Contains(Play.ArmyNameHexFlag + " ****** --live-probe")
+              && !Report.ForTheRecord("a\n" + armyNameLine + "\nb").Contains("546F772074657374"));
+
         Check("an empty name passes no --name to --play either",
               !Play.PlayArgs(hosting: true, "GATE01", "a1b2c3d4e5f6a7b8", "bore.pub:12345", "", army, sampleBinding, Play.FirstHost)
                   .Contains("--name"));
@@ -786,6 +1008,105 @@ public static class Selftest
               && Play.TheirArmy("  <- their army: " + string.Join(' ', Enumerable.Repeat(burrower, 17))) is null
               && Play.TheirArmy($"  <- hash for turn 1: pieces <- their army: {burrower}") is null);
 
+        Check("a halt rings and raises the window once, and a second halt line does not",
+              Play.RingsOnHalt(false)
+              && !Play.RingsOnHalt(true));
+
+        Check("the joiner's name is spelled in hex on the wire's own line, so it cannot spell a halt",
+              Play.TheirName("  <- their name: 424F42") == "BOB"
+              && Play.TheirName("  <- their name: " + Convert.ToHexString("PLAYER12"u8.ToArray())) == "PLAYER12"
+              && NetplayLine.Read("  <- their name: 424F42", true, true)
+                  is { Meaning: LineMeaning.TheirName, Name: "BOB" }
+              && !Convert.ToHexString("HALT"u8.ToArray()).Contains("HALT", StringComparison.OrdinalIgnoreCase)
+              && NetplayLine.Read("  <- their name: " + Convert.ToHexString("HALT"u8.ToArray()), true, true)
+                  is { Meaning: LineMeaning.TheirName, Name: "HALT" });
+
+        Check("nothing but hex for eight allowed characters reads as a name",
+              Play.TheirName("  <- their name: BOB") is null
+              && Play.TheirName("  <- their name: 2E2E") is null
+              && Play.TheirName("  <- their name: 424f42") is null
+              && Play.TheirName("  <- their name: 42 4F 42") is null
+              && Play.TheirName("  <- their name: " + Convert.ToHexString("TOOLONGNAME"u8.ToArray())) is null
+              && Play.TheirName("  <- their name: ") is null
+              && Play.TheirName("  <- peer role: lobby") is null
+              && Play.TheirName("  <- their setup: 2 <- their name: 424F42") is null);
+
+        var posted = new DateTime(2026, 9, 24, 12, 0, 0, DateTimeKind.Utc);
+        var staleClock = new Play.InviteClock();
+        var noInviteYet = staleClock.Left(posted) is null && !staleClock.RunOut(posted + TimeSpan.FromHours(1));
+        staleClock.Heard(Play.InviteClock.Event.Made, posted);
+        Check("a posted invite runs out after ten minutes with nobody in it, and not before (D-259)",
+              noInviteYet
+              && staleClock.Left(posted) == Play.InviteWindow
+              && !staleClock.RunOut(posted + Play.InviteWindow - TimeSpan.FromSeconds(1))
+              && staleClock.RunOut(posted + Play.InviteWindow)
+              && staleClock.RunOut(posted + Play.InviteWindow + TimeSpan.FromMinutes(1))
+              && !Play.InviteWentStale.Contains(';'));
+
+        var lifeClock = new Play.InviteClock();
+        lifeClock.Heard(Play.InviteClock.Event.Made, posted);
+        lifeClock.Heard(Play.InviteClock.Event.PeerLeft, posted + TimeSpan.FromMinutes(9));
+        var leaveKeptTheTime = lifeClock.Left(posted + TimeSpan.FromMinutes(9)) == TimeSpan.FromMinutes(1);
+        lifeClock.Heard(Play.InviteClock.Event.KeyedPeerHere, posted + TimeSpan.FromMinutes(9));
+        var heldWhileKeyed = !lifeClock.Running && !lifeClock.RunOut(posted + TimeSpan.FromMinutes(40))
+                             && lifeClock.Left(posted + TimeSpan.FromMinutes(40)) == TimeSpan.FromMinutes(1);
+        lifeClock.Heard(Play.InviteClock.Event.KeyedPeerGone, posted + TimeSpan.FromMinutes(40));
+        var runsAfterTheyLeave = lifeClock.Running
+                                 && !lifeClock.RunOut(posted + TimeSpan.FromMinutes(40) + TimeSpan.FromSeconds(59))
+                                 && lifeClock.RunOut(posted + TimeSpan.FromMinutes(41));
+        Check("an invite's ten minutes start only when it is made, stop while a keyed opponent is in it, and run on after they leave",
+              leaveKeptTheTime && heldWhileKeyed && runsAfterTheyLeave);
+
+        var tunnelLine = "tunnel open: --server bore.pub:40001";
+        var guardClock = new Play.InviteClock();
+        var firstLineIsTheInvite = NetplayLine.Read(tunnelLine, hosting: true, haveInvite: guardClock.InviteShown,
+                                                    tunnelHost: "bore.pub").Meaning == LineMeaning.TunnelAddress;
+        guardClock.Heard(Play.InviteClock.Event.Made, posted);
+        guardClock.Heard(Play.InviteClock.Event.RanOut, posted + Play.InviteWindow);
+        Check("after an invite runs out, a second tunnel line is still not read as an address",
+              firstLineIsTheInvite
+              && NetplayLine.Read(tunnelLine, hosting: true, haveInvite: guardClock.InviteShown,
+                                  tunnelHost: "bore.pub").Meaning != LineMeaning.TunnelAddress
+              && guardClock.Left(posted + Play.InviteWindow) is null);
+        Check("D-292: a Stop press is logged with the stage it was pressed at, and whether the match had halted",
+              Play.StopPressedLine(Stage.Playing, halted: true) == "  stop pressed (stage Playing, halted)"
+              && Play.StopPressedLine(Stage.HostInvite, halted: false) == "  stop pressed (stage HostInvite)");
+        Check("D-283: the invite clock counts down in minutes and seconds, turns urgent in its last minute, and stops at zero",
+              Play.InviteClockText(TimeSpan.FromSeconds(582)) is { Text: "9m 42s left", Urgent: false }
+              && Play.InviteClockText(TimeSpan.FromSeconds(59)) is { Text: "0m 59s left", Urgent: true }
+              && Play.InviteClockText(TimeSpan.FromSeconds(-3)).Text == "0m 00s left");
+
+        Check("a hidden safety code shows none of its characters, and Show gives only the four to read out (D-259, D-277)",
+              Play.SafetyReadOutCells("D5FC31D86A71485C", hosting: true, shown: false) is { Length: 4 } hidden
+              && hidden.All(c => c.Length == 0)
+              && string.Concat(Play.SafetyReadOutCells("D5FC31D86A71485C", hosting: true, shown: true)) == "485C"
+              && string.Concat(Play.SafetyReadOutCells("D5FC31D86A71485C", hosting: false, shown: true)) == "D5FC"
+              && Play.SafetyReadOutCells("", hosting: true, shown: true).All(c => c.Length == 0)
+              && Play.JoinedHeadline("BOB") == "BOB has joined" && Play.JoinedHeadline(null) == "Your opponent has joined");
+        Check("an army bigger than the placing rows is named with both numbers",
+              Play.ArmyDoesNotFit(9, Play.PlacingSquares(1, 2)) is { } tooBig
+              && tooBig.Contains("9 machines")
+              && tooBig.Contains("2 squares")
+              && Play.ArmyDoesNotFit(2, Play.PlacingSquares(1, 2)) is null
+              && Play.ArmyDoesNotFit(9, Play.PlacingSquares(8, 2)) is null);
+
+        Check("an army is never refused against a board shape this PC does not know",
+              Play.ArmyDoesNotFit(9, Play.PlacingSquares(8, -1)) is null
+              && Play.ArmyDoesNotFit(9, Play.PlacingSquares(0, 2)) is null);
+
+        Check("netplay's two placing refusals read as an army that does not fit",
+              NetplayLine.Read("  9 machines is more than the 2 squares the placing rows of this "
+                               + "1x8 board hold", true, true)
+                  is { Meaning: LineMeaning.ArmyDoesNotFit, Machines: 9, PlacingSquares: 2 }
+              && NetplayLine.Read("  not ready: 9 machine(s) but 0 placement(s), the game places one "
+                                  + "per record, in order.", true, true)
+                  is { Meaning: LineMeaning.ArmyDoesNotFit, Machines: 9, PlacingSquares: -1 });
+
+        Check("a ready refusal that has placements is not read as an army that does not fit",
+              NetplayLine.Read("  not ready: 9 machine(s) but 4 placement(s), the game places one "
+                               + "per record, in order.", true, true)
+                  is { Meaning: LineMeaning.Nothing }
+              && !NetplayLine.ProvesTheLink(LineMeaning.ArmyDoesNotFit));
         Check("D-235: the host's setup line says who goes first, and silence is the host",
               Play.TheirSetup($"  <- their setup: 2 machine(s), challenge {easy}, rules 20/40, first joiner")
                   is { First: Play.FirstJoiner, DraftPoints: 40 }
@@ -848,6 +1169,22 @@ public static class Selftest
 
         Check("a clipboard call that throws is handed back to the handler, never out of it",
               !escaped && thrownEarly is TimeoutException && thrownLate is TimeoutException && nothing is null);
+
+        uint[] heldClipboard = [0x800401D0, 0x800401D2, 0x800401DF];
+        Exception?[] notTheClipboard =
+        [
+            null,
+            new TimeoutException("Timeout opening clipboard."),
+            new InvalidOperationException("Timeout opening clipboard."),
+            Marshal.GetExceptionForHR(unchecked((int)0x80070005)),
+            new COMException("near", unchecked((int)0x800401CF)),
+            new COMException("near", unchecked((int)0x800401E0)),
+            new COMException("other", unchecked((int)0x80004005)),
+            new AggregateException(new COMException("inside", unchecked((int)0x800401D0))),
+        ];
+        Check("a clipboard another program holds is kept from ending the launcher, and no other exception is",
+              heldClipboard.All(code => Play.ClipboardBusy(Marshal.GetExceptionForHR(unchecked((int)code))))
+              && notTheClipboard.All(thrown => !Play.ClipboardBusy(thrown)));
 
         Check("a challenge list that did not load is said only when no attempt is under way",
               Play.MatchListNote(0, attemptUnderWay: false) is { Headline: "Cannot reach netplay" }
@@ -945,6 +1282,15 @@ public static class Selftest
 
         Check("a board that moved into the slot is refused",
               Play.PickedBoard(1, "Ridge", shelf).Problem == Play.BoardListChanged);
+
+        List<StrikeBoard> marred =
+        [
+            new() { Name = "Default" },
+            new() { Name = "Marred", Width = 6, Height = 6, PlacementRows = 2, Cells = [.. new int[35], 99] },
+        ];
+        Check("a saved board the game cannot play is refused when the match starts, not sent as a shape with no board",
+              Play.PickedBoard(2, "Marred", marred) is { Board: null, Problem: Play.BoardCannotBePlayed }
+              && Play.PickedBoard(2, "Ridge", shelf) is { Board: not null, Problem: null });
 
         var stockLayout = StrikeBoard.Stock();
         Check("the stock layout is the game's 8x8 with two placing rows and only terrain the game has",
@@ -1387,6 +1733,26 @@ public static class Selftest
               && queries[0].StartsWith("https://1.1.1.1/") && queries[1].StartsWith("https://8.8.8.8/")
               && TunnelDns.MaxAnswerBytes <= 64 * 1024);
 
+        List<string>? AnswerRead(string text)
+        {
+            try
+            {
+                return TunnelDns.AnswerAddresses(text);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        const string twoAnswers = """{"Answer":[{"type":1,"data":"159.223.110.159"},{"type":5,"data":"x"},{"type":1,"data":"159.223.110.160"}]}""";
+        Check("a DNS-over-HTTPS answer with a repeated key reads as no address instead of throwing, and a plain one gives every address",
+              AnswerRead("""{"Answer":[],"Answer":[{"type":1,"data":"1.2.3.4"}]}""") is { Count: 0 }
+              && AnswerRead("""{"Answer":[{"type":1,"type":1,"data":"1.2.3.4"}]}""") is { Count: 0 }
+              && AnswerRead("""{"Answer":[{"type":"one","data":"1.2.3.4"}]}""") is { Count: 0 }
+              && AnswerRead(twoAnswers) is { Count: 2 } both
+              && both[0] == "159.223.110.159" && both[1] == "159.223.110.160");
+
         Check("the frost scale caps the longer side of the backdrop",
               Play.FrostScale(5120, 2880) == 1600.0 / 5120 && Play.FrostScale(1600, 120000) == 1600.0 / 120000
               && Play.FrostScale(800, 600) == 1.0 && Play.FrostScale(0, 0) == 1.0);
@@ -1502,14 +1868,154 @@ public static class Selftest
                   == LineMeaning.Halt);
 
         Check("the halt screen says the match stopped in plain words, with nothing from the wire on it",
-              Play.HaltText(disagreement: false) is { Headline: "Stopped" } plainHalt
+              Play.HaltText(disagreement: false) is { Headline: "Stopped: Strikers could not follow the last turn" } plainHalt
               && plainHalt.Detail.Contains("stopped the match") && !plainHalt.Detail.Contains("HALT")
-              && Play.HaltText(disagreement: true) is { Headline: "Stopped: the two games disagree" } boardsHalt
-              && boardsHalt.Detail.Contains("no longer match"));
+              && Play.HaltText(disagreement: true) is { Headline: "Stopped: the games went out of sync" } boardsHalt
+              && boardsHalt.Detail.Contains("both PCs"));
         Check("the halted Match line says what to do, nothing about the boards, and no line carries a semicolon",
-              Play.HaltStatus.StartsWith("Halted.") && Play.HaltStatus.Contains("Stop")
+              Play.HaltStatus.StartsWith("Press Stop") && !Play.HaltStatus.Contains("Halted")
               && !Play.HaltStatus.Contains("boards") && !Play.HaltStatus.Contains(';')
-              && !Play.HaltText(false).Detail.Contains(';') && !Play.HaltText(true).Detail.Contains(';'));
+              && !Play.HaltText(false).Detail.Contains(';') && !Play.HaltText(true).Detail.Contains(';')
+              && !Play.SetupsDifferText().Headline.Contains(';') && !Play.SetupsDifferText().Detail.Contains(';'));
+        Check("D-279: every stop headline names its cause after \"Stopped: \", and no detail runs past two sentences",
+              new[]
+              {
+                  Play.LeftText(true), Play.LeftText(false), Play.ClosedText(true), Play.ClosedText(false),
+                  Play.HaltText(true), Play.HaltText(false), Play.StoppedHereText(), Play.SetupsDifferText(),
+              }.All(t => t.Headline.StartsWith("Stopped: ") && t.Headline.Length > "Stopped: ".Length
+                         && t.Detail.Count(c => c == '.') <= 2));
+
+        var setupsHere = NetplayLine.Read($"HALT: {NetplayLine.SetupsDifferReason}", true, true);
+        var setupsRelayed = NetplayLine.Read(
+            $"HALT: {NetplayLine.PeerStoppedPrefix}: {NetplayLine.SetupsDifferReason}", false, true);
+        var setupsMore = NetplayLine.Read($"HALT: {NetplayLine.SetupsDifferReason}, and more", true, true);
+        var desyncHalt = NetplayLine.Read("HALT: desync after turn 3: pieces differ (raised on seat 0)", true, true);
+        var watcherHalt = NetplayLine.Read(
+            "HALT: the board watcher stopped, so this PC can no longer read its own turns", true, true);
+        var setupsScreen = Play.SetupsDifferText();
+        Check("the setups-differ halt, on this PC or relayed from the other, shows its own stop screen and not the " +
+              "out-of-sync one",
+              new[] { setupsHere, setupsRelayed }.All(r => r.Meaning == LineMeaning.Halt && r.SetupsDiffer
+                                                           && !r.Disagreement
+                                                           && Play.StopText(r.SetupsDiffer, r.Disagreement)
+                                                               == setupsScreen)
+              && setupsScreen.Headline == "Stopped: the two setups do not match"
+              && setupsScreen.Detail
+                  == "The armies, the board or the rules differ between the PCs."
+              && setupsScreen.Headline != Play.HaltText(true).Headline
+              && setupsScreen.Headline != Play.HaltText(false).Headline
+              && (setupsScreen.Headline + setupsScreen.Detail).All(c => c is >= ' ' and <= '~')
+              && new[] { setupsMore, desyncHalt, watcherHalt }.All(r => r.Meaning == LineMeaning.Halt
+                                                                       && !r.SetupsDiffer && r.Disagreement
+                                                                       && Play.StopText(r.SetupsDiffer, r.Disagreement)
+                                                                           == Play.HaltText(true)));
+
+        Check("D-262: the line saying the other PC's recording landed is read as that, and nothing like it is",
+              NetplayLine.Read("  <- the other player's recording of the match is in recordings, "
+                               + "opponent-20260921-180000.jsonl", true, true).Meaning == LineMeaning.TheirRecording
+              && NetplayLine.Read("  <- the other player's recording of the match is in recordings, "
+                                  + "opponent-20******-180000.jsonl", false, true).Meaning == LineMeaning.TheirRecording
+              && NetplayLine.Read("HALT: <- the other player's recording of the match is in recordings, "
+                                  + "opponent-20260921-180000.jsonl", true, true).Meaning == LineMeaning.Halt
+              && NetplayLine.Read("  <- the other player's recording of the match is in recordings, "
+                                  + "opponent-20260921-180000.jsonl trailing", true, true).Meaning == LineMeaning.Nothing
+              && NetplayLine.Read("  the other player's recording of the match could not be written", true, true)
+                  .Meaning == LineMeaning.Nothing
+              && !NetplayLine.ProvesTheLink(LineMeaning.TheirRecording));
+
+        Check("D-263: the line saying the other PC's log landed is read as that, the halt still wins, and the line "
+              + "for the start of their recording asks for nothing",
+              NetplayLine.Read("  <- the other player's log is in recordings, opponent-20260921-180000.log",
+                               true, true).Meaning == LineMeaning.TheirLog
+              && NetplayLine.Read("  <- the other player's log is in recordings, opponent-20******-180000.log",
+                                  false, true).Meaning == LineMeaning.TheirLog
+              && NetplayLine.Read("HALT: <- the other player's log is in recordings, opponent-20260921-180000.log",
+                                  true, true).Meaning == LineMeaning.Halt
+              && NetplayLine.Read("  <- the other player's log is in recordings, opponent-20260921-180000.log now",
+                                  true, true).Meaning == LineMeaning.Nothing
+              && NetplayLine.Read("  told: <- the other player's log is in recordings, opponent-20260921-180000.log",
+                                  true, true).Meaning == LineMeaning.Nothing
+              && NetplayLine.Read("  <- the start of the other player's recording is in recordings, "
+                                  + "opponent-20260921-180000-start.jsonl", true, true).Meaning == LineMeaning.Nothing
+              && !NetplayLine.ProvesTheLink(LineMeaning.TheirLog));
+
+        Check("D-262: while the report is finishing the Match line says so, and every report line says what to "
+              + "press, with no semicolon",
+              Play.HaltStatusFinishing == "Finishing the report."
+              && Play.ReportSaved(true).Contains("Send report") && Play.ReportSaved(true).Contains("Only one")
+              && Play.ReportSaved(false).Contains("Send report") && Play.ReportSaved(false).Contains("theirs")
+              && Play.ReportNotSaved.Contains("Send report") && Play.ReportNotSaved.Contains(MatchLog.Name)
+              && new[]
+              {
+                  Play.HaltStatusFinishing, Play.ReportSaved(true), Play.ReportSaved(false),
+                  Play.ReportNotSaved, Play.StoppedHereText().Headline, Play.StoppedHereText().Detail,
+              }.All(t => !t.Contains(';')));
+
+        var finishingHalt = Play.StopScreenFor("Strikers stopped the match on both PCs.", ask: true, pending: true,
+                                               reportSaved: true, theirsLanded: false);
+        var settledHalt = Play.StopScreenFor("Strikers stopped the match on both PCs.", ask: true, pending: false,
+                                             reportSaved: true, theirsLanded: true);
+        var leftPending = Play.StopScreenFor("Strikers stopped the match on both PCs.", ask: false, pending: true,
+                                             reportSaved: true, theirsLanded: false);
+        Check("D-284: Stop is off and the spinner turns while a halt's report is finishing, both undone once it "
+              + "settles, the finishing is said once, and a stop that asks for no report never locks Stop",
+              !finishingHalt.StopEnabled && !finishingHalt.ReportVisible && finishingHalt.Spinner
+              && finishingHalt.Status == Play.HaltStatusFinishing
+              && finishingHalt.Detail == "Strikers stopped the match on both PCs."
+              && settledHalt.StopEnabled && !settledHalt.Spinner && settledHalt.ReportVisible
+              && settledHalt.Status == Play.HaltStatus
+              && settledHalt.Detail.EndsWith(Play.ReportSaved(true))
+              && leftPending.StopEnabled && !leftPending.Spinner && !leftPending.ReportVisible
+              && leftPending.Status == Play.HaltStatus
+              && Play.StopScreenFor("x", ask: true, pending: false, reportSaved: false, theirsLanded: false)
+                     .Detail.EndsWith(Play.ReportNotSaved));
+
+        nint[] openBefore = [11, 22];
+        Check("D-285: Send report's folder window sits at the bottom right of the work area at 900 by 600 scaled, "
+              + "shrinks to fit a small screen, and only a single window that was not open before is moved",
+              Report.FolderWindowBounds(0, 0, 1920, 1040, 1.0) == (1004, 424, 900, 600)
+              && Report.FolderWindowBounds(0, 0, 2560, 1400, 1.5) == (1186, 476, 1350, 900)
+              && Report.FolderWindowBounds(1920, 0, 2720, 500, 1.0) == (1936, 16, 768, 468)
+              && Report.FolderWindowBounds(0, 0, 1920, 1040, 0) == (1004, 424, 900, 600)
+              && Report.NewWindow(openBefore, [11, 22, 33]) == 33
+              && Report.NewWindow(openBefore, [11, 22]) is null
+              && Report.NewWindow(openBefore, [22]) is null
+              && Report.NewWindow(openBefore, [11, 33, 44]) is null);
+
+        Check("a folder window is moved only when the Windows folder's own explorer.exe owns it",
+              Report.IsExplorerImage(@"C:\Windows\explorer.exe", @"C:\WINDOWS\explorer.exe")
+              && !Report.IsExplorerImage(@"C:\Users\someone\AppData\Local\Temp\explorer.exe", @"C:\Windows\explorer.exe")
+              && !Report.IsExplorerImage(null, @"C:\Windows\explorer.exe"));
+
+        Check("D-263: the report settles 35 seconds after the stop, when all three of the other PC's files have "
+              + "had their time to cross",
+              !Play.ReportSettled(new DateTime(2026, 9, 21, 18, 0, 0), new DateTime(2026, 9, 21, 18, 0, 34))
+              && Play.ReportSettled(new DateTime(2026, 9, 21, 18, 0, 0), new DateTime(2026, 9, 21, 18, 0, 35))
+              && Play.ReportSettles.TotalSeconds > 30);
+
+        Check("D-262: a play process that exits on its own is a stop, and a halt's exit or a normal one is not",
+              Play.PlayEndedUnexpectedly(null, alreadyStopped: false)
+              && Play.PlayEndedUnexpectedly(1, alreadyStopped: false)
+              && Play.PlayEndedUnexpectedly(-532462766, alreadyStopped: false)
+              && !Play.PlayEndedUnexpectedly(0, alreadyStopped: false)
+              && !Play.PlayEndedUnexpectedly(2, alreadyStopped: false)
+              && !Play.PlayEndedUnexpectedly(1, alreadyStopped: true)
+              && MatchDriver.ExitLine(true, 1) == "  netplay --play exited, code 1"
+              && MatchDriver.ExitLine(false, null) == "  netplay exited, code unknown");
+
+        Check("D-262: Send report opens the issues page of the repository the update check reads",
+              Release.IssuesUrl(Release.GitHubRepo)
+                  == $"https://github.com/{Release.GitHubRepo}/issues/new?template={Release.IssueTemplate}"
+              && Release.IssueTemplate == "problem.yml");
+
+        Check("D-286: Send report's page is titled with the stop's headline, escaped, and has no title without one",
+              Release.IssuesUrl("owner/Strikers", "Stopped: the games went out of sync")
+                  == "https://github.com/owner/Strikers/issues/new?template=problem.yml"
+                     + "&title=Stopped%3A%20the%20games%20went%20out%20of%20sync"
+              && Release.IssuesUrl("owner/Strikers", "a&b=c#d").EndsWith("&title=a%26b%3Dc%23d")
+              && Release.IssuesUrl("owner/Strikers", null) == Release.IssuesUrl("owner/Strikers")
+              && Release.IssuesUrl("owner/Strikers", "  ") == Release.IssuesUrl("owner/Strikers")
+              && !Release.IssuesUrl("owner/Strikers").Contains("title="));
 
         Check("a player leaving reads as that, on the PC that left and on the other, and a desync does not",
               NetplayLine.Read("HALT: a player left the match before it ended, so it cannot go on", true, true)
@@ -1591,6 +2097,95 @@ public static class Selftest
               && NetplayLine.Read("  <- the other player left the room", true, true).Meaning != LineMeaning.PeerLeft
               && NetplayLine.Read("HALT: <- the other player left", true, true).Meaning == LineMeaning.Halt);
 
+        Check("both players in the match proves the opponent is here, so a lobby's leaving line before it is spent",
+              NetplayLine.ProvesTheOpponentIsHere(
+                  NetplayLine.Read("    both players are in the match (peer role: play)", true, true).Meaning)
+              && !NetplayLine.ProvesTheOpponentIsHere(
+                  NetplayLine.Read("    <- the other player left", true, true).Meaning)
+              && !NetplayLine.ProvesTheOpponentIsHere(
+                  NetplayLine.Read("    paired, seat 0", true, true).Meaning));
+
+        string[] afterFailedSetUp =
+        [
+            "    <- the other player left",
+            "    paired, seat 1",
+            "    encrypted, fingerprint 1E1833535E873CBD",
+            "    <- the other player is in the match (peer role: play)",
+        ];
+
+        static bool LeftClockRuns(IEnumerable<string> lines, bool bothConfirmed)
+        {
+            var running = false;
+            foreach (var line in lines)
+            {
+                var meaning = NetplayLine.Read(line, false, false).Meaning;
+                if (NetplayLine.ProvesTheOpponentIsHere(meaning, bothConfirmed))
+                {
+                    running = false;
+                }
+
+                if (meaning == LineMeaning.PeerLeft)
+                {
+                    running = true;
+                }
+            }
+
+            return running;
+        }
+
+        Check("once both codes are confirmed, the other PC's --play arriving after its lobby left stops the opponent-left clock, so the set-up screen does not fall back to Choose your army, while a lobby that leaves with nothing after it, or a --play before both confirmed, leaves the clock running",
+              !LeftClockRuns(afterFailedSetUp, bothConfirmed: true)
+              && LeftClockRuns(afterFailedSetUp[..3], bothConfirmed: true)
+              && LeftClockRuns(afterFailedSetUp, bothConfirmed: false));
+
+        Check("the opponent-left clock takes both codes as confirmed only on the set-up screen with both confirmations held, so the other PC's --play arriving after the safety code changed there, with one code confirmed, or on another screen leaves the clock running",
+              !LeftClockRuns(afterFailedSetUp,
+                             Play.BothConfirmedAtSetUp(Stage.SetUp, confirmedByMe: true, confirmedByPeer: true))
+              && LeftClockRuns(afterFailedSetUp, Play.BothConfirmedAtSetUp(Stage.SetUp, false, false))
+              && LeftClockRuns(afterFailedSetUp, Play.BothConfirmedAtSetUp(Stage.SetUp, true, false))
+              && LeftClockRuns(afterFailedSetUp, Play.BothConfirmedAtSetUp(Stage.SetUp, false, true))
+              && LeftClockRuns(afterFailedSetUp, Play.BothConfirmedAtSetUp(Stage.Safety, true, true))
+              && LeftClockRuns(afterFailedSetUp, Play.BothConfirmedAtSetUp(Stage.Playing, true, true)));
+
+        Check("an opponent who leaves once both codes are confirmed on the set-up screen is waited for in place for as long as at the play stage, so a --play slower than 8 s to pair no longer sends the screen back to Choose your army, while before both confirmed the screen still goes back after 8 s",
+              Play.JudgeOpponentLeft(12, atPlayStage: false, bothConfirmedAtSetUp: true) == Play.OpponentLeftVerdict.Nothing
+              && Play.JudgeOpponentLeft(Play.OpponentLeftAtPlayAfter - 1, false, true) == Play.OpponentLeftVerdict.Nothing
+              && Play.JudgeOpponentLeft(Play.OpponentLeftAtPlayAfter, false, true) == Play.OpponentLeftVerdict.WaitInPlace
+              && Play.JudgeOpponentLeft(600, false, true) == Play.OpponentLeftVerdict.WaitInPlace
+              && Play.JudgeOpponentLeft(Play.OpponentLeftAtPlayAfter - 1, true, false) == Play.OpponentLeftVerdict.Nothing
+              && Play.JudgeOpponentLeft(Play.OpponentLeftAtPlayAfter, true, false) == Play.OpponentLeftVerdict.WaitInPlace
+              && Play.JudgeOpponentLeft(Play.OpponentLeftAfter - 1, false, false) == Play.OpponentLeftVerdict.Nothing
+              && Play.JudgeOpponentLeft(Play.OpponentLeftAfter, false, false) == Play.OpponentLeftVerdict.GoBack
+              && Play.JudgeOpponentLeft(600, false, false) == Play.OpponentLeftVerdict.GoBack);
+
+        Check("a room code is masked only as a whole word, so a hand-edited short code inside a recording's stamp leaves the landing line intact",
+              MatchDriver.MaskCode("  <- the other player's log is in recordings, opponent-20260922-121015.log", "0922")
+                  == "  <- the other player's log is in recordings, opponent-20260922-121015.log"
+              && MatchDriver.MaskCode("> netplay --play --room 0922 --name X", "0922") == "> netplay --play --room ****** --name X"
+              && MatchDriver.MaskCode("room code: ABCDEF", "ABCDEF") == "room code: ******"
+              && MatchDriver.MaskCode("room code: A.C", "A.C") == "room code: ******"
+              && MatchDriver.MaskCode("nothing here", "") == "nothing here");
+
+        Check("a game that closed is read apart from a player who left, on this PC and on the other",
+              NetplayLine.Read("HALT: the game on this PC closed before the match ended, so it cannot go on", true, true)
+                  is { Meaning: LineMeaning.Halt, GameClosed: true, ClosedHere: true, PlayerLeft: false }
+              && NetplayLine.Read("HALT: the other PC stopped the match: the game on this PC closed before the match ended, so it cannot go on", true, true)
+                  is { Meaning: LineMeaning.Halt, GameClosed: true, ClosedHere: false }
+              && NetplayLine.Read("HALT: a player left the match before it ended, so it cannot go on", true, true)
+                  is { Meaning: LineMeaning.Halt, PlayerLeft: true, GameClosed: false }
+              && Play.ClosedText(true).Headline == "Stopped: the game closed"
+              && Play.ClosedText(false).Headline == "Stopped: your opponent's game closed"
+              && !Play.ClosedText(true).Detail.Contains(';') && !Play.ClosedText(false).Detail.Contains(';'));
+
+        Check("a saved army that carries the opponent entry's name is shown apart from it, and every other name as it is",
+              Play.ArmyLabel(Play.OpponentArmyEntry) == Play.OpponentArmyEntry + " (saved)"
+              && Play.ArmyLabel("Bold edge") == "Bold edge");
+
+        Check("the opponent-left wait at the play stage outlasts the play link's pairing, and the lobby's stays short",
+              Play.OpponentLeftLimit(true) >= 20
+              && Play.OpponentLeftLimit(false) == Play.OpponentLeftAfter
+              && Play.OpponentLeftLimit(true) > Play.OpponentLeftLimit(false));
+
         Check("the other player starting over is read from the lobby's line, whole",
               NetplayLine.Read("  the other player started over, so our build and setup go out again", false, true).Meaning
                   == LineMeaning.PeerStartedOver
@@ -1622,8 +2217,10 @@ public static class Selftest
                                                  or LineMeaning.Halt or LineMeaning.PortInUse
                                                  or LineMeaning.Crashed or LineMeaning.TunnelDown
                                                  or LineMeaning.LinkDown or LineMeaning.CodeChanged
-                                                 or LineMeaning.OtherVersionTried))
-              && everyMeaning.Count(NetplayLine.ProvesTheLink) == everyMeaning.Length - 9);
+                                                 or LineMeaning.OtherVersionTried
+                                                 or LineMeaning.ArmyDoesNotFit or LineMeaning.TheirRecording
+                                                 or LineMeaning.TheirLog))
+              && everyMeaning.Count(NetplayLine.ProvesTheLink) == everyMeaning.Length - 12);
 
         Check("netplay's own status lines read as themselves, whole",
               NetplayLine.Read("    in sync", true, true).Meaning == LineMeaning.InSync
@@ -1672,7 +2269,6 @@ public static class Selftest
             "<- their setup: 1 machine(s), challenge 0ECEA5D9B9F841908D9716A1421F0AEC, rules 99/1",
             "match over: you won, 1 point(s) to 0",
             "a new match started on this PC after the shared one ended",
-            "REFUSED: This test build of Strikers is no longer active",
         };
         var hashLinesReadAsNothing = spelled.All(s =>
             NetplayLine.Read($"  <- hash for turn 3: pieces {s} terrain 0000000000000000", true, true).Meaning
@@ -1727,13 +2323,13 @@ public static class Selftest
 
         Check("something that is not a shared board at all says so",
               StrikeBoard.FromShareString("hello", out var notABoard) is null &&
-              notABoard!.Contains(StrikeBoard.SharePrefix));
+              notABoard == StrikeBoard.NotACode);
 
         var asymmetric = new StrikeBoard();
         asymmetric.Paint(0, 0, Terrain.Marsh);
         Check("an over-long shared board is refused before it is walked",
               StrikeBoard.FromShareString(StrikeBoard.SharePrefix + new string('a', 400), out var tooLong) is null
-              && tooLong!.Contains("longer")
+              && tooLong == StrikeBoard.NotACode
               && StrikeBoard.MaxShareLength >= asymmetric.ToShareString().Length);
 
         Check("a shared 8x8 board is 24 characters",
@@ -1814,7 +2410,7 @@ public static class Selftest
                    shared[5..];
         Check("a mangled head is blamed on the trip, not the board's design",
               StrikeBoard.FromShareString(torn, out var tornProblem) is null &&
-              tornProblem!.Contains("check digits"));
+              tornProblem == StrikeBoard.Damaged);
 
         Check("the match path ALLOWS a board wider than it is deep",
               Play.PlayableBoard(new int[40], 8, 5) is { Count: 40 } &&
@@ -1899,6 +2495,32 @@ public static class Selftest
         Check("an army naming a machine the roster lacks cannot be shared",
               ArmyShare.ToShareString(["Widemaw"], shareRoster) is null);
 
+        var alteredArmy = sharedArmy[..5] + (sharedArmy[5] == '0' ? '1' : '0') + sharedArmy[6..];
+        var toastTexts = new List<string?>();
+        foreach (var bad in new[] { "", "hello", ArmyShare.SharePrefix + new string('a', 400), "SA-ab",
+                                    sharedArmy[..^2], alteredArmy })
+        {
+            ArmyShare.FromShareString(bad, shareRoster, out var badArmy);
+            toastTexts.Add(badArmy);
+        }
+
+        ArmyShare.FromShareString(sharedArmy, shareRoster.Append("Widemaw"), out var foreignArmy);
+        toastTexts.Add(foreignArmy);
+        foreach (var bad in new[] { "hello", StrikeBoard.SharePrefix + new string('a', 400), shared[..^6], corrupted })
+        {
+            StrikeBoard.FromShareString(bad, out var badBoard);
+            toastTexts.Add(badBoard);
+        }
+
+        toastTexts.AddRange([ArmyStore.ShelfFull, BoardStore.ShelfFull, Play.UnreadableFile("armies.json"),
+                             Play.ImportedText(1), Play.ImportedText(3)]);
+        Check("D-287: every refusal a pasted code or a full list can put in a toast is a sentence: a capital first, "
+              + "a full stop last, no semicolon, and no talk of characters or check digits",
+              toastTexts.All(t => t is { Length: > 1 } && char.IsUpper(t[0]) && t.EndsWith('.') && !t.Contains(';')
+                                  && !t.Contains("character") && !t.Contains("check digit"))
+              && Play.ImportedText(1) == "Imported 1 machine. Name the army and press Save."
+              && Play.ImportedText(3).StartsWith("Imported 3 machines."));
+
         Check("a one-machine army shares and comes back",
               ArmyShare.FromShareString(ArmyShare.ToShareString(["Slaughterspine"], shareRoster),
                                         shareRoster, out _) is { Count: 1 });
@@ -1952,39 +2574,46 @@ public static class Selftest
             masked.OnLine("lobby SECRET7 open", masked.Generation);
             masked.Say("> netplay --room SECRET7");
             var file = File.ReadAllText(log.Path);
-            Check("the driver masks the room code before the file and the screen alike",
+            Check("the driver masks the room code before the file",
                   !file.Contains("SECRET7") && file.Contains("lobby ****** open")
                   && file.Contains("--room ******")
-                  && seen.Count == 1 && seen[0] == "lobby ****** open");
+                  && seen.Count == 1);
 
-            var fingerprintLine = "  encrypted, fingerprint 56266CBB6C879E84";
-            var spawnLine = "> netplay --room-id f9766870e760ac5bb56f07da --server 159.223.110.159:24877";
+            var haltCode = new MatchDriver(a => a(), claimName: TestClaim("halt-code")) { RoomCode = "HALT" };
+            var haltSeen = new List<string>();
+            haltCode.Output += haltSeen.Add;
+            haltCode.OnLine("HALT: the other PC stopped the match: desync", haltCode.Generation);
+            Check("the line reader gets netplay's own line, so a room code cannot hide a halt from it",
+                  haltSeen.Count == 1
+                  && NetplayLine.Read(haltSeen[0], hosting: false, haveInvite: false).Meaning == LineMeaning.Halt);
+
+            var fingerprintLine = "  encrypted, fingerprint A1B2C3D4E5F60718";
+            var spawnLine = "> netplay --room-id abcdef0123456789abcdef01 --server 159.223.110.159:24877";
             seen.Clear();
             masked.OnLine(fingerprintLine, masked.Generation);
             masked.Say(spawnLine);
             var record = File.ReadAllText(log.Path);
 
             Check("the safety fingerprint does not reach the file",
-                  !record.Contains("56266CBB6C879E84")
+                  !record.Contains("A1B2C3D4E5F60718")
                   && record.Contains("encrypted, fingerprint ********"));
 
             Check("the routing id does not reach the file, so a report cannot open the room",
-                  !record.Contains("f9766870e760ac5bb56f07da") && record.Contains("--room-id ******"));
-
+                  !record.Contains("abcdef0123456789abcdef01") && record.Contains("--room-id ******"));
 
             Check("the tunnel address DOES stay in the file, on purpose",
                   record.Contains("--server 159.223.110.159:24877"));
 
             Check("the launcher still reads the fingerprint, which the file no longer holds",
-                  seen.Count == 1 && Play.Fingerprint(seen[0]) == "56266CBB6C879E84"
+                  seen.Count == 1 && Play.Fingerprint(seen[0]) == "A1B2C3D4E5F60718"
                   && Play.Fingerprint(MatchDriver.ForTheRecord(seen[0])) is null);
 
             foreach (var spelling in new[]
                      {
-                         "  room 29CB9690657048F301F3783C created",
-                         "  room 29CB9690657048F301F3783C: both seats filled",
-                         "  room 29CB9690657048F301F3783C: peer took seat 1",
-                         "  room id: 29cb9690657048f301f3783c",
+                         "  room 0A1B2C3D4E5F60718293A4B5 created",
+                         "  room 0A1B2C3D4E5F60718293A4B5: both seats filled",
+                         "  room 0A1B2C3D4E5F60718293A4B5: peer took seat 1",
+                         "  room id: 0a1b2c3d4e5f60718293a4b5",
                      })
             {
                 masked.OnLine(spelling, masked.Generation);
@@ -1992,12 +2621,36 @@ public static class Selftest
 
             var relayLines = File.ReadAllText(log.Path);
             Check("every spelling of the routing id is masked, not just the spawn line's flag",
-                  !relayLines.Contains("29CB9690657048F301F3783C")
-                  && !relayLines.Contains("29cb9690657048f301f3783c"));
+                  !relayLines.Contains("0A1B2C3D4E5F60718293A4B5")
+                  && !relayLines.Contains("0a1b2c3d4e5f60718293a4b5"));
 
             Check("the room code's own lines are left alone by the routing-id mask",
                   MatchDriver.ForTheRecord("  room code: ******") == "  room code: ******"
                   && MatchDriver.ForTheRecord("> netplay --room ******") == "> netplay --room ******");
+
+            Check("D-263: the room code is masked however it is spelled, and this PC's own name with it",
+                  MatchDriver.ForTheRecord("> netplay --play --name VARL --army x")
+                      == "> netplay --play --name ****** --army x"
+                  && MatchDriver.ForTheRecord("> netplay --lobby --join K7Q4M2 --server bore.pub:24877")
+                      == "> netplay --lobby --join ****** --server bore.pub:24877"
+                  && MatchDriver.ForTheRecord("  room code: K7Q4M2") == "  room code: ******"
+                  && MatchDriver.ForTheRecord("> netplay --lobby --room K7Q4M2")
+                      == "> netplay --lobby --room ******");
+
+            Check("D-263: the other player's name reaches the file neither spelled in hex nor as the screen shows it",
+                  MatchDriver.ForTheRecord("  <- their name: 5641524C") == "  <- their name: ******"
+                  && Play.TheirName("  <- their name: 5641524C") == "VARL"
+                  && MatchDriver.ForTheRecord($"  screen: {Play.JoinedHeadline("VARL")}") == "  screen: ****** has joined"
+                  && MatchDriver.ForTheRecord($"  screen: {Play.JoinedHeadline(null)}")
+                      == "  screen: Your opponent has joined");
+
+            var wrongAnswer = MatchDriver.ForTheRecord($"  network: {TunnelDns.Note("bore.pub", "159.223.110.159", "192.168.255.254")}");
+            var noAnswer = MatchDriver.ForTheRecord($"  network: {TunnelDns.Note("bore.pub", "159.223.110.159", null)}");
+            Check("D-263: the network note in the file names the address Strikers found, never the one this PC's network gave",
+                  !wrongAnswer.Contains("192.168.255.254") && wrongAnswer.Contains("159.223.110.159")
+                  && noAnswer.Contains("159.223.110.159")
+                  && MatchDriver.ForTheRecord("  tunnel open: --server 159.223.110.159:24877")
+                      == "  tunnel open: --server 159.223.110.159:24877");
 
             var installFolder = @"C:\Users\Someone\Games\Strikers\";
             var spawnWithProbe = MatchDriver.ForTheRecord(
@@ -2036,6 +2689,48 @@ public static class Selftest
 
             Check("a message that never held the path is left as it is",
                   Play.WithoutPath("nothing to report", pretend) == "nothing to report");
+
+            var upgradeDir = Directory.CreateDirectory(System.IO.Path.Combine(logDir.FullName, "upgraded"));
+            var carried = new MatchLog(upgradeDir.FullName);
+            File.WriteAllText(carried.Path, "2026-09-19 20:00:00  > netplay --play --name VARL" + Environment.NewLine);
+            File.WriteAllText(carried.PreviousPath, "2026-09-18 20:00:00  They go by VARL." + Environment.NewLine);
+            carried.Write("the first line of the new build");
+            var movedAside = File.Exists(carried.UnmaskedPath)
+                             && File.Exists(carried.PreviousUnmaskedPath)
+                             && File.ReadAllText(carried.UnmaskedPath).Contains("VARL")
+                             && File.ReadAllText(carried.PreviousUnmaskedPath).Contains("VARL")
+                             && !File.Exists(carried.PreviousPath);
+            var freshLines = File.ReadAllLines(carried.Path);
+
+            var second = new MatchLog(upgradeDir.FullName);
+            second.Write("a later run appends to the marked log");
+            var appendedLines = File.ReadAllLines(carried.Path);
+
+            File.WriteAllText(carried.Path, new string('x', (int)MatchLog.MaxBytes + 1));
+            second.Write("after the roll");
+            var rolledLines = File.ReadAllLines(carried.Path);
+
+            var onlyPrevDir = Directory.CreateDirectory(System.IO.Path.Combine(logDir.FullName, "only-previous"));
+            var onlyPrev = new MatchLog(onlyPrevDir.FullName);
+            File.WriteAllText(onlyPrev.PreviousPath, "2026-09-18 20:00:00  They go by VARL." + Environment.NewLine);
+            onlyPrev.Write("a fresh log beside an old predecessor");
+            var predecessorAside = !File.Exists(onlyPrev.PreviousPath)
+                                   && File.ReadAllText(onlyPrev.PreviousUnmaskedPath).Contains("VARL")
+                                   && File.ReadAllLines(onlyPrev.Path)[0].EndsWith(MatchLog.Marker, StringComparison.Ordinal);
+
+            Check("a log from before the masking is moved aside on the first write, and the fresh log and every "
+                  + "roll after it start with the marker that says the file is masked",
+                  movedAside
+                  && predecessorAside
+                  && freshLines.Length == 2
+                  && freshLines[0].EndsWith(MatchLog.Marker, StringComparison.Ordinal)
+                  && freshLines[1].Contains("the first line of the new build")
+                  && appendedLines.Length == 3
+                  && appendedLines[2].Contains("a later run appends to the marked log")
+                  && rolledLines.Length == 2
+                  && rolledLines[0].EndsWith(MatchLog.Marker, StringComparison.Ordinal)
+                  && rolledLines[1].Contains("after the roll")
+                  && File.Exists(carried.PreviousPath));
         }
         finally
         {
@@ -2047,6 +2742,70 @@ public static class Selftest
                                       "match-20260903-2105.jsonl", "notes.txt"])
               == "match-20260903-2105.jsonl"
               && Report.NewestRecording(["notes.txt"]) is null);
+
+        Check("D-260: the report takes the newest recording from each side, and neither is the other's",
+              Report.NewestOpponentRecording(["match-20260920-1200.jsonl", "opponent-20260920-1100.jsonl",
+                                              "opponent-20260920-1300.jsonl"])
+              == "opponent-20260920-1300.jsonl"
+              && Report.NewestRecording(["match-20260920-1200.jsonl", "opponent-20260920-1300.jsonl"])
+              == "match-20260920-1200.jsonl"
+              && Report.NewestOpponentRecording(["match-20260920-1200.jsonl"]) is null
+              && Report.NewestOpponentRecording(["opponent-20260920-1300.txt"]) is null);
+
+        var maskDir = Directory.CreateTempSubdirectory("strikers-report-mask-");
+        try
+        {
+            File.WriteAllText(System.IO.Path.Combine(maskDir.FullName, MatchLog.Name),
+                              "masked log\n  > netplay --play --army-name-hex 44617368 --name BOB\n  screen: BOB has joined\n");
+            var maskRec = Directory.CreateDirectory(System.IO.Path.Combine(maskDir.FullName, Report.RecordingsFolder));
+            File.WriteAllText(System.IO.Path.Combine(maskRec.FullName, "match-20260923-1600.jsonl"), "{}\n");
+            File.WriteAllText(System.IO.Path.Combine(maskRec.FullName, "opponent-20260923-1600.jsonl"), "{}\n");
+            File.WriteAllText(System.IO.Path.Combine(maskRec.FullName, "opponent-20260923-1600.log"),
+                              "  fingerprint D5FC31D86A71485C\n  --binding " + new string('a', 64) + "\n");
+            var maskZip = Report.Save(maskDir.FullName, new DateTime(2026, 9, 23, 16, 0, 0));
+            var zipped = new System.Text.StringBuilder();
+            if (maskZip is not null)
+            {
+                using var archive = System.IO.Compression.ZipFile.OpenRead(maskZip);
+                foreach (var entry in archive.Entries)
+                {
+                    using var reader = new StreamReader(entry.Open());
+                    zipped.Append(reader.ReadToEnd());
+                }
+            }
+
+            var inZip = zipped.ToString();
+            Check("a report masks every line it zips, this PC's log written before a mask and the other PC's log alike",
+                  inZip.Contains("--army-name-hex ******") && inZip.Contains("--name ******")
+                  && inZip.Contains("screen: ****** has joined") && inZip.Contains("fingerprint ********")
+                  && inZip.Contains("--binding ********")
+                  && !inZip.Contains("44617368") && !inZip.Contains("BOB") && !inZip.Contains("D5FC31D8")
+                  && !inZip.Contains(new string('a', 64)));
+        }
+        finally
+        {
+            maskDir.Delete(recursive: true);
+        }
+
+        var olderMasksDir = Directory.CreateTempSubdirectory("strikers-older-masks-");
+        try
+        {
+            var olderMasks = new MatchLog(olderMasksDir.FullName);
+            File.WriteAllText(olderMasks.Path, "2026-09-22 20:00:00  masked log" + Environment.NewLine
+                                               + "2026-09-22 20:03:38  > netplay --play --army-name-hex 546F77" + Environment.NewLine);
+            olderMasks.Write("the first line under this set of masks");
+            var restarted = File.ReadAllLines(olderMasks.Path);
+            Check("a log begun under an older set of masks is moved aside on the first write, and a new one starts",
+                  File.Exists(olderMasks.UnmaskedPath)
+                  && File.ReadAllText(olderMasks.UnmaskedPath).Contains("546F77")
+                  && restarted.Length == 2
+                  && restarted[0].EndsWith(MatchLog.Marker, StringComparison.Ordinal)
+                  && !restarted.Any(l => l.Contains("546F77")));
+        }
+        finally
+        {
+            olderMasksDir.Delete(recursive: true);
+        }
 
         var reportDir = Directory.CreateTempSubdirectory("strikers-report-");
         try
@@ -2078,6 +2837,47 @@ public static class Selftest
                                                 "strikers-report-20260903-210500.zip")
                   && entries.SequenceEqual(["match-20260903-2105.jsonl", MatchLog.PreviousName, MatchLog.Name]));
 
+            File.WriteAllText(System.IO.Path.Combine(recDir.FullName, "opponent-20260901-1200.jsonl"), "{}");
+            File.WriteAllText(System.IO.Path.Combine(recDir.FullName, "opponent-20260903-2105.jsonl"), "{\"x\":1}");
+            File.WriteAllText(System.IO.Path.Combine(recDir.FullName, "opponent-20260903-2105-start.jsonl"), "{}");
+            File.WriteAllText(System.IO.Path.Combine(recDir.FullName, "opponent-20260903-2105.log"), "theirs");
+            File.WriteAllText(System.IO.Path.Combine(recDir.FullName, "opponent-20260901-1200.log"), "older");
+            var paired = Report.Save(reportDir.FullName, new DateTime(2026, 9, 3, 21, 6, 0),
+                                     new ReportFacts("Stopped", "1.0.1", null, "id", null, null, false));
+            var pairedEntries = new List<string>();
+            var aboutRead = "";
+            if (paired is not null)
+            {
+                using (var archive = System.IO.Compression.ZipFile.OpenRead(paired))
+                {
+                    pairedEntries.AddRange(archive.Entries.Select(e => e.FullName));
+                    if (archive.GetEntry(Report.AboutName) is { } aboutEntry)
+                    {
+                        using var reader = new StreamReader(aboutEntry.Open());
+                        aboutRead = reader.ReadToEnd();
+                    }
+                }
+            }
+
+            Check("D-263: a saved report holds about.txt first, then the two logs of this PC and the other PC's, "
+                  + "then the three recordings of the same match, and no older file of theirs",
+                  pairedEntries.SequenceEqual([Report.AboutName, MatchLog.Name, MatchLog.PreviousName,
+                                               "opponent-20260903-2105.log", "match-20260903-2105.jsonl",
+                                               "opponent-20260903-2105-start.jsonl",
+                                               "opponent-20260903-2105.jsonl"])
+                  && aboutRead.Contains("this PC: joiner")
+                  && aboutRead.Contains("the other PC's recording: opponent-20260903-2105.jsonl, as they sent it, "
+                                        + "unverified")
+                  && aboutRead.Contains("the other PC's log: opponent-20260903-2105.log, as they sent it, unverified")
+                  && aboutRead.Contains("the start of the other PC's recording: "
+                                        + "opponent-20260903-2105-start.jsonl, as they sent it, unverified"));
+
+            Report.Drop(paired);
+            Report.Drop(System.IO.Path.Combine(recDir.FullName, "opponent-20260903-2105.jsonl"));
+            Check("D-262: dropping a report deletes that report and nothing that is not one",
+                  paired is not null && !File.Exists(paired)
+                  && File.Exists(System.IO.Path.Combine(recDir.FullName, "opponent-20260903-2105.jsonl")));
+
             var blocked = Directory.CreateDirectory(System.IO.Path.Combine(reportDir.FullName, "blocked"));
             File.WriteAllText(System.IO.Path.Combine(blocked.FullName, MatchLog.Name), "log");
             File.WriteAllText(System.IO.Path.Combine(blocked.FullName, Report.Folder), "in the way");
@@ -2101,48 +2901,165 @@ public static class Selftest
                   && kept.Contains(Report.FileName(new DateTime(2026, 9, 3, 21, 5, 0)))
                   && kept.Contains(Report.FileName(new DateTime(2026, 9, 11, 9, 0, 0)))
                   && kept.Contains("strikers-report-mine.txt"));
+
+            var named = Report.Save(reportDir.FullName, new DateTime(2026, 9, 12, 9, 0, 0),
+                                    new ReportFacts("Halted after > netplay --play --name VARL", "1.0.1", null,
+                                                    "id", null, null, true));
+            var aboutNamed = "";
+            if (named is not null)
+            {
+                using var archive = System.IO.Compression.ZipFile.OpenRead(named);
+                if (archive.GetEntry(Report.AboutName) is { } namedEntry)
+                {
+                    using var reader = new StreamReader(namedEntry.Open());
+                    aboutNamed = reader.ReadToEnd();
+                }
+            }
+
+            Check("about.txt is written through the same mask as the log, so a name in the reason for the stop "
+                  + "never reaches the zip",
+                  aboutNamed.Contains("why: Halted after > netplay --play --name ******")
+                  && !aboutNamed.Contains("VARL")
+                  && aboutNamed.Contains("this PC: host"));
         }
         finally
         {
             reportDir.Delete(recursive: true);
         }
 
-        var saves = 0;
-        var once = new ReportOnce();
-        var said = new List<string>();
-        foreach (var attempt in new[] { 3, 3, 3, 4 })
+        var stops = new StopReport();
+        var saves = new List<string>();
+        foreach (var (attempt, what) in new[]
+                 {
+                     (3, "stop"), (3, "stop"), (3, "landed"), (3, "landed"), (3, "stop"),
+                     (4, "landed"), (4, "stop"), (4, "landed"),
+                 })
         {
-            said.Add(once.For(attempt, () =>
+            var save = what == "stop" ? stops.SaveAtStop(attempt) : stops.SaveOnTheirLog(attempt);
+            if (save)
             {
-                saves++;
-                return $"report {saves}";
-            }));
+                saves.Add($"{attempt} {what}");
+            }
         }
 
-        Check("an attempt writes one report however many halt lines it prints",
-              saves == 2 && said.SequenceEqual(["report 1", "report 1", "report 1", "report 2"]));
+        Check("D-262: an attempt writes at most two reports however many lines it prints, one at the stop and "
+              + "one when the other PC's log lands after it",
+              saves.SequenceEqual(["3 stop", "3 landed", "4 stop"]) && stops.TheirLogLanded);
 
-        var sept30 = new DateOnly(2026, 9, 30);
-        Check("a test build's mark names the tester and never the date, and a public build has none",
-              TestBuild.Mark("Jane", sept30) == "private test build for Jane"
-              && TestBuild.Mark(null, null) is null
-              && TestBuild.Mark(null, sept30) == "private test build");
-        Check("a test build runs through its last day and refuses from the next, a public build never, and the refusal names no date",
-              !TestBuild.Expired(sept30, sept30) && TestBuild.Expired(sept30, sept30.AddDays(1))
-              && !TestBuild.Expired(null, sept30.AddYears(10))
-              && !TestBuild.ExpiredMessage().Contains(';') && !TestBuild.ExpiredMessage().Contains("2026")
-              && !TestBuild.ExpiredMessage().Contains("expir"));
+        var landings = new StopReport();
+        landings.NoteTheirRecording(7);
+        Check("D-263: the other PC's recording landing is noted for the wording and writes no report, and the log "
+              + "landing after the stop writes the second one",
+              landings is { TheirsLanded: true, TheirLogLanded: false, SavedAtStop: false }
+              && landings.SaveAtStop(7)
+              && landings.SaveOnTheirLog(7)
+              && !landings.SaveOnTheirLog(7)
+              && landings is { TheirsLanded: true, TheirLogLanded: true, SavedSecond: true });
 
-        Check("the no-longer-active refusal reads as a halt flagged inactive, and its screen names no date",
-              NetplayLine.Read("REFUSED: This test build of Strikers is no longer active. Ask the person who gave it to you for a new one.", true, true)
-                  is { Meaning: LineMeaning.Halt, Inactive: true }
-              && NetplayLine.Read("HALT: desync after turn 4: pieces differ", true, true) is { Meaning: LineMeaning.Halt, Inactive: false }
-              && !Play.InactiveText().Detail.Contains(';') && !Play.InactiveText().Headline.Contains("expir"));
+        var settling = new StopReport();
+        settling.SaveAtStop(9);
+        settling.NoteTheirRecording(9);
+        var atTheSettle = settling.SaveOnSettle(9);
+        var settledTwice = settling.SaveOnSettle(9);
 
-        Check("a peer's halt reason spelling the inactive sentence is an ordinary halt",
-              NetplayLine.Read("HALT: the other PC stopped the match: This test build of Strikers is no longer active. Ask the person who gave it to you for a new one.", true, true)
-                  is { Meaning: LineMeaning.Halt, Inactive: false });
+        var nothingLanded = new StopReport();
+        nothingLanded.SaveAtStop(10);
 
+        var logWroteIt = new StopReport();
+        logWroteIt.SaveAtStop(11);
+        logWroteIt.SaveOnTheirLog(11);
+
+        Check("the settle writes the second report when a file of theirs landed and their log never did, once "
+              + "only, and writes none when nothing landed or when the log's own landing already wrote it",
+              atTheSettle
+              && !settledTwice
+              && !nothingLanded.SaveOnSettle(10)
+              && !logWroteIt.SaveOnSettle(11)
+              && settling is { SavedAtStop: true, SavedSecond: true });
+
+        var sameMatch = new[]
+        {
+            "match-20260921-170000.jsonl", "opponent-20260921-170000.jsonl", "opponent-20260921-170000.log",
+            "match-20260921-180000.jsonl", "opponent-20260921-180000.jsonl",
+            "opponent-20260921-180000-start.jsonl", "opponent-20260921-180000.log", "notes.txt",
+        };
+        var theirsMissing = new[]
+        {
+            "match-20260921-170000.jsonl", "opponent-20260921-170000.jsonl", "opponent-20260921-170000.log",
+            "match-20260921-180000.jsonl", "opponent-20260921-180000-start.jsonl",
+        };
+        Check("D-263: a report pairs this PC's newest recording with the other PC's three files of the same match, "
+              + "never an older one, and says so where one is missing",
+              Report.Pair(sameMatch) == ("match-20260921-180000.jsonl", "opponent-20260921-180000.jsonl",
+                                         "opponent-20260921-180000-start.jsonl", "opponent-20260921-180000.log")
+              && Report.Pair(theirsMissing) == ("match-20260921-180000.jsonl", null,
+                                                "opponent-20260921-180000-start.jsonl", null)
+              && Report.Pair(["opponent-20260921-170000.jsonl", "opponent-20260921-180000.jsonl"])
+                  == (null, "opponent-20260921-180000.jsonl", null, null)
+              && Report.Pair([]) == (null, null, null, null));
+
+        var facts = new ReportFacts("Stopped: the games went out of sync", "1.0.1", "abc1234",
+                                    "0123456789abcdef0123456789abcdef", "fedcba  protocol 28", null, true);
+        var about = Report.AboutText(facts, new DateTimeOffset(2026, 9, 21, 18, 4, 11, TimeSpan.FromHours(-7)),
+                                     "match-20260921-180000.jsonl", null, null, null);
+        Check("D-263: a report says what wrote it and which seat this PC held, without the offset that would say "
+              + "where the player is",
+              about.Contains("saved: 2026-09-21 18:04:11") && !about.Contains("-07:00")
+              && about.Contains("why: Stopped: the games went out of sync")
+              && about.Contains("version: 1.0.1") && about.Contains("commit: abc1234")
+              && about.Contains("netplay: fedcba  protocol 28") && about.Contains("live-probe: not read")
+              && about.Contains("this PC: host") && about.Contains("this PC's recording: match-20260921-180000.jsonl")
+              && Report.AboutText(facts with { Hosted = null }, DateTimeOffset.Now, null, null, null, null)
+                  .Contains("this PC: not in a match"));
+
+        Check("D-263: a report names each of the other PC's three files as theirs and unverified, or says none "
+              + "arrived, and marks the halt reason as their own words",
+              about.Contains("the other PC's recording: none arrived")
+              && about.Contains("the start of the other PC's recording: none arrived")
+              && about.Contains("the other PC's log: none arrived")
+              && about.Contains("the halt reason after 'the other PC stopped the match:' is the other PC's own words")
+              && Report.AboutText(facts, DateTimeOffset.Now, "match-20260921-180000.jsonl",
+                                  "opponent-20260921-180000.jsonl", "opponent-20260921-180000-start.jsonl",
+                                  "opponent-20260921-180000.log")
+                  .Contains("the other PC's log: opponent-20260921-180000.log, as they sent it, unverified"));
+
+        var stopLines = Play.StopLines(facts);
+        Check("D-263: the lines written to the log at a stop carry the version and the three ids, so the tail the "
+              + "other PC receives says which build it was",
+              stopLines.Length == 3
+              && stopLines[0] == "  version 1.0.1, commit abc1234"
+              && stopLines[1] == "  Strikers 0123456789abcdef0123456789abcdef, netplay fedcba  protocol 28, "
+                                 + "live-probe not read"
+              && stopLines[2] == "  this PC: host"
+              && Play.StopLines(facts with { Hosted = null })[2] == "  this PC: not in a match"
+              && Play.StopLines(facts with { Version = null, Commit = null })[0]
+                  == "  version not set, commit not stamped"
+              && stopLines.All(l => !l.Contains(';')));
+
+        Check("the newest GitHub tag is the highest version among them, with or without the v (D-258)",
+              Release.NewestTagFrom("""[{"name":"v1.0.0"},{"name":"v1.0.2"},{"name":"1.0.1"}]""") == "1.0.2"
+              && Release.NewestTagFrom("""[{"name":"v1.0.0"}]""") == "1.0.0"
+              && Release.NewestTagFrom("[]") is null);
+
+        Check("a tag that is not a version, and an answer that is not a list of tags, name nothing (D-258)",
+              Release.NewestTagFrom("""[{"name":"nightly"},{"name":"test-build-7"}]""") is null
+              && Release.NewestTagFrom("""[{"name":"v1.0-beta"},{"tag":"v9.9.9"}]""") is null
+              && Release.NewestTagFrom("""{"name":"v9.9.9"}""") is null
+              && Release.NewestTagFrom("not json") is null
+              && Release.NewestTagFrom(null) is null);
+
+        Check("a tag is a version only as v and digits and dots, so vv9.0.0, V9.0.0 and a padded name are not",
+              Release.NewestTagFrom(
+                  """[{"name":"vv9.0.0"},{"name":"V9.0.0"},{"name":" v9.0.0"},{"name":"v9.0.0\n"},{"name":"v1.0.2"}]""")
+                  == "1.0.2");
+
+        Check("the tags address is built only from a repository name GitHub could hold, over https (D-258)",
+              Release.TagsUrl(Release.GitHubApi, Release.GitHubRepo)
+                  == $"{Release.GitHubApi}/repos/{Release.GitHubRepo}/tags?per_page=100"
+              && Release.TagsUrl(Release.GitHubApi, "owner/repo/../../evil") is null
+              && Release.TagsUrl(Release.GitHubApi, "owner repo") is null
+              && Release.TagsUrl(Release.GitHubApi, "") is null
+              && Release.TagsUrl("http://api.github.com", Release.GitHubRepo) is null);
         Check("a version number reads as its numbers, and anything else is no version (D-242)",
               Release.Clean("1.2.3") == "1.2.3" && Release.Clean(" v1.02 ") == "1.2"
               && Release.Clean("1.2-beta") is null && Release.Clean("") is null && Release.Clean("1..2") is null
@@ -2161,7 +3078,7 @@ public static class Selftest
               Release.Newer("1.10.0", "1.9.9") && !Release.Newer("1.0", "1.0.0") && Release.Newer("1.0.1", "1.0")
               && !Release.Newer("0.9", "1.0") && !Release.Newer("garbage", "1.0") && !Release.Newer("2.0", null));
 
-        Check("the update popup asks on every open while Nexus has a newer version, and never otherwise (D-242)",
+        Check("the update popup asks on every open while a newer version is out, and never otherwise (D-242)",
               Release.Offer("1.0.0", "1.1.0") && Release.Offer("1.0.9", "1.1")
               && !Release.Offer("1.1.0", "1.1") && !Release.Offer("1.2.0", "1.1.0")
               && !Release.Offer("1.0.0", null) && !Release.Offer(null, "1.1.0") && !Release.Offer("1.0.0", "soon"));
@@ -2207,7 +3124,32 @@ public static class Selftest
                   is { DifferentGameBuilds: false }
               && Play.GameBuildsText() is { Headline: "Your games are on different builds" } builds
               && builds.Detail.Contains("Steam") && !builds.Detail.Contains(';') && !builds.Headline.Contains(';')
-              && Play.ShowsVersionScreen(true, playStarted: false) && !Play.ShowsVersionScreen(true, playStarted: true));
+              && Play.ShowsRefusalScreen(true, playStarted: false) && !Play.ShowsRefusalScreen(true, playStarted: true));
+
+        var updatedBehind = Release.GameUpdatedText("1.1.0", "1.2.0");
+        var updatedNewest = Release.GameUpdatedText("1.2.0", "1.2.0");
+        var updatedOffline = Release.GameUpdatedText(null, null);
+        Check("a game build this Strikers does not know reads as its own refusal with the game-updated words, from netplay, from live-probe and from Unlock challenges, and no other halt does",
+              NetplayLine.Read("REFUSED: game build not supported: this Strikers does not know this game build, so nothing is written into the game", true, true)
+                  is { Meaning: LineMeaning.Halt, UnknownGameBuild: true, DifferentGameBuilds: false, Disagreement: false }
+              && NetplayLine.Read("REFUSED: game build not supported: 667B1778-949F000 is not one this live-probe knows, so it writes nothing into the game", false, false)
+                  is { Meaning: LineMeaning.Halt, UnknownGameBuild: true }
+              && Play.ReadUnlock("REFUSED: game build not supported: 667B1778-949F000 is not one this live-probe knows, so it writes nothing into the game\r\n")
+                  == Play.UnlockOutcome.GameUpdated
+              && Play.ReadUnlock("  cleared 39 of 39. Re-open the challenge list to see it.") == Play.UnlockOutcome.Cleared
+              && NetplayLine.Read("REFUSED: game build mismatch: this PC is 667B1777-949F000, the other is 667B1777-949F001. Both players must run the same version of Horizon Forbidden West.", true, true)
+                  is { UnknownGameBuild: false }
+              && NetplayLine.Read("    ! REFUSED: game build not supported: this Strikers does not know this game build", true, true)
+                  is { UnknownGameBuild: false }
+              && NetplayLine.Read("HALT: the other PC stopped the match: game build not supported", true, true)
+                  is { UnknownGameBuild: false }
+              && NetplayLine.Read("HALT: desync after turn 4: pieces differ", true, true)
+                  is { UnknownGameBuild: false }
+              && updatedBehind.Headline == "Horizon Forbidden West was updated"
+              && updatedBehind.Detail == "Strikers needs an update to work with it. You have 1.1.0 and the newest is 1.2.0. Update Strikers, then try again."
+              && updatedNewest.Detail == "Strikers needs an update to work with it. Try again when a new version of Strikers is out."
+              && updatedOffline.Detail == updatedNewest.Detail
+              && new[] { updatedBehind.Headline, updatedBehind.Detail, updatedNewest.Detail }.All(text => !text.Contains(';')));
 
         Check("the host's relay line about another version reads as a notice, not a halt (D-242)",
               NetplayLine.Read(Release.OtherVersionTried + " (protocol v24)", true, true).Meaning == LineMeaning.OtherVersionTried
@@ -2217,12 +3159,12 @@ public static class Selftest
         var current = Release.DifferentVersionsText("1.1.0", "1.1.0");
         var unknown = Release.DifferentVersionsText("1.0.0", null);
         var noNumber = Release.DifferentVersionsText(null, null);
-        Check("the version messages say who updates, from this PC's and Nexus's numbers only, with no semicolon (D-242)",
+        Check("the version messages say who updates, from this PC's and the newest numbers only, with no semicolon (D-242)",
               behind.Detail.Contains("You have 1.0.0 and the newest is 1.1.0")
               && current.Detail.Contains("The other player needs to update")
               && unknown.Detail.Contains("Whoever has the older version")
               && noNumber.Detail.StartsWith("Both of you", StringComparison.Ordinal)
-              && Release.OfferText("1.0.0", "1.1.0") == "You have 1.0.0. The newest is 1.1.0, on Nexus Mods."
+              && Release.OfferText("1.0.0", "1.1.0") == "You have 1.0.0. The newest is 1.1.0."
               && new[] { behind.Headline, behind.Detail, current.Detail, unknown.Detail, noNumber.Detail,
                          Release.TriedToJoinText("1.0.0", "1.1.0"), Release.OfferText("1.0.0", "1.1.0") }
                   .All(text => !text.Contains(';')));
@@ -2233,8 +3175,8 @@ public static class Selftest
               && Release.ModId(null) == 0);
 
         Check("the version screen is only for a refusal before play, and a halt during a match is an ordinary halt",
-              Play.ShowsVersionScreen(true, playStarted: false) && !Play.ShowsVersionScreen(true, playStarted: true)
-              && !Play.ShowsVersionScreen(false, playStarted: false));
+              Play.ShowsRefusalScreen(true, playStarted: false) && !Play.ShowsRefusalScreen(true, playStarted: true)
+              && !Play.ShowsRefusalScreen(false, playStarted: false));
 
         Check("the other-version notice shows only to a host whose match has not started",
               Play.ShowsOtherVersionNotice(hosting: true, playStarted: false)

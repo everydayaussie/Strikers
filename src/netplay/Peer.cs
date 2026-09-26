@@ -60,6 +60,14 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
 
     public string? Fingerprint { get; private set; }
 
+    public (string? Code, int Channel) CodeAndChannel()
+    {
+        lock (_sendGate)
+        {
+            return (Fingerprint, ChannelGeneration);
+        }
+    }
+
     public SessionRole LocalRole { get; set; } = SessionRole.Play;
     public SessionRole? RemoteRole { get; private set; }
 
@@ -169,6 +177,7 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
 
                     if (Halted)
                     {
+                        DrainFrame(frame);
                         break;
                     }
 
@@ -283,7 +292,7 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
                             }
 
                             HaltAndTell("a sealed frame that could not be opened: altered, replayed, " +
-                                        "reordered, or sent before the key exchange");
+                                        "reordered, sent after a lost one, or sent before the key exchange");
                             break;
                         }
 
@@ -317,7 +326,7 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
                     {
                         var why = FrameLimits.Safe(frame.Reason);
                         Halt(RelayedHaltReason(why.Length > 0 ? why : "peer halted"));
-                        return;
+                        break;
                     }
 
                     if (frame.Kind == MsgKind.Role)
@@ -341,6 +350,11 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
                         break;
                     }
                 }
+
+                if (Halted)
+                {
+                    await DrainAsync(reader, token);
+                }
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) when (ex is SocketException or IOException)
@@ -361,6 +375,57 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
             await Task.Delay(backoff, token);
             backoff = TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 15));
         }
+    }
+
+    private async Task DrainAsync(StreamReader reader, CancellationToken token)
+    {
+        var rate = new RateLimiter(FrameLimits.MaxFramesPerWindow, FrameLimits.RateWindow);
+        while (!token.IsCancellationRequested && Draining(DateTime.UtcNow))
+        {
+            string? line;
+            try
+            {
+                line = await ReadLineBoundedAsync(reader, FrameLimits.MaxLine, token);
+            }
+            catch (InvalidDataException)
+            {
+                return;
+            }
+            catch (Exception ex) when (ex is SocketException or IOException or ObjectDisposedException)
+            {
+                return;
+            }
+
+            if (line is null || !rate.Allow(DateTime.UtcNow))
+            {
+                return;
+            }
+
+            var frame = Protocol.Decode(line);
+            if (frame is null)
+            {
+                continue;
+            }
+
+            DrainFrame(frame);
+        }
+    }
+
+    internal void DrainFrame(Frame frame)
+    {
+        if (frame.Kind != MsgKind.Sealed)
+        {
+            return;
+        }
+
+        var opened = _channel?.Open(frame.Box ?? "");
+        var inner = opened is null ? null : Protocol.Decode(opened);
+        if (inner is null || !DrainCarries(inner.Kind) || FrameLimits.Refuse(inner) is not null)
+        {
+            return;
+        }
+
+        HandlerFault(() => Received?.Invoke(inner));
     }
 
     internal static string? HandlerFault(Action handle)
@@ -466,15 +531,33 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
         return ourBound ? BindVerdict.OpenDroppingBinding : BindVerdict.Open;
     }
 
-    public byte[]? BindToChannel(int generation)
+    public byte[]? BindToChannel(int generation, string? code)
     {
-        if (generation != ChannelGeneration || _channelBinding is null)
+        lock (_sendGate)
         {
-            return null;
-        }
+            var named = code is not null && string.Equals(code, Fingerprint, StringComparison.Ordinal);
+            if (generation != ChannelGeneration || _channelBinding is null || !named)
+            {
+                return null;
+            }
 
-        Binding = _channelBinding;
-        return Binding;
+            Binding = _channelBinding;
+            return Binding;
+        }
+    }
+
+    public bool SendIfStillOn(Frame f, int generation)
+    {
+        lock (_sendGate)
+        {
+            if (generation != ChannelGeneration || _channel is null)
+            {
+                return false;
+            }
+
+            Send(f);
+            return true;
+        }
     }
 
     private bool TryCompleteKeyExchange(Frame f)
@@ -621,7 +704,13 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
 
     public void Send(Frame f)
     {
+        _ = TrySend(f);
+    }
+
+    public bool TrySend(Frame f)
+    {
         string? holdProblem = null;
+        var sent = false;
         lock (_sendGate)
         {
             Frame? outgoing = f;
@@ -654,8 +743,18 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
 
             if (outgoing is not null)
             {
-                try { _writer?.WriteLine(Protocol.Encode(outgoing)); }
-                catch (Exception e) when (IsLinkError(e)) { }
+                var writer = _writer;
+                if (writer is not null)
+                {
+                    try
+                    {
+                        writer.WriteLine(Protocol.Encode(outgoing));
+                        sent = true;
+                    }
+                    catch (Exception e) when (IsLinkError(e))
+                    {
+                    }
+                }
             }
         }
 
@@ -663,6 +762,8 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
         {
             HaltAndTell(holdProblem);
         }
+
+        return sent;
     }
 
     internal const int MaxHeldFrames = 64;
@@ -786,7 +887,7 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
     {
         if (HashCompareProblem(_seat, mine.Count, turn) is { } cannot)
         {
-            Halt(cannot);
+            HaltAndTell(cannot);
             return false;
         }
 
@@ -821,7 +922,7 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
     {
         if (_seat < 0)
         {
-            Halt("hash compared before pairing, no seat, so no canonical frame to compare in");
+            HaltAndTell("hash compared before pairing, no seat, so no canonical frame to compare in");
             return false;
         }
 
@@ -892,9 +993,24 @@ internal sealed class Peer(string host, int port, string room, int preferredSeat
 
     public static Action<string>? OnHalt;
 
+    public static readonly TimeSpan HaltDrain = TimeSpan.FromSeconds(30);
+
+    private DateTime _drainUntil = DateTime.MinValue;
+
+    public bool Draining(DateTime now)
+    {
+        return Halted && now < _drainUntil;
+    }
+
+    public static bool DrainCarries(MsgKind kind)
+    {
+        return kind is MsgKind.Recording or MsgKind.RecordingStart or MsgKind.Log;
+    }
+
     private void Halt(string reason)
     {
         Halted = true;
+        _drainUntil = DateTime.UtcNow + HaltDrain;
         HaltReason = reason;
         Console.Error.WriteLine($"HALT: {reason}");
         try { OnHalt?.Invoke(reason); } catch { }

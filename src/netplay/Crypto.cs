@@ -130,8 +130,7 @@ public sealed class SecureChannel
     private readonly byte[] _send;
     private readonly byte[] _recv;
     private long _sealed;
-    private ulong _lastSeen;
-    private bool _seenAny;
+    private ulong _next;
 
     public SecureChannel(SessionKeys keys)
     {
@@ -170,7 +169,7 @@ public sealed class SecureChannel
 
         var counter = BitConverter.ToUInt64(raw, 0);
 
-        if (_seenAny && counter <= _lastSeen)
+        if (counter != _next)
         {
             return null;
         }
@@ -189,8 +188,7 @@ public sealed class SecureChannel
             return null;
         }
 
-        _lastSeen = counter;
-        _seenAny = true;
+        _next = counter + 1;
         return Encoding.UTF8.GetString(plain);
     }
 

@@ -42,7 +42,7 @@
         <Border Classes="optionDivider" />
         <Button Name="ResetButton" Classes="glass" VerticalAlignment="Center" />
         <Border Classes="optionDivider" />
-        <TextBox Name="ImportBox" PlaceholderText="Paste board" FontSize="13" VerticalAlignment="Center">
+        <TextBox Name="ImportBox" PlaceholderText="Board code" FontSize="13" VerticalAlignment="Center">
           <TextBox.InnerRightContent>
             <Button Name="ImportButton" Classes="inlineAction" Content="Import" />
           </TextBox.InnerRightContent>

@@ -272,7 +272,7 @@ public partial class ArmiesPanel : UserControl
                 try
                 {
                     await clipboard.SetValueAsync(DataFormat.Text, code);
-                    ToastRail.Show(ToastKind.Good, $"Copied the army code for '{saved.Name}'.");
+                    ToastRail.Show(ToastKind.Good, "Army code copied.");
                 }
                 catch (Exception)
                 {
@@ -294,14 +294,14 @@ public partial class ArmiesPanel : UserControl
 
         if (roster.Count == 0)
         {
-            ToastRail.Show(ToastKind.Bad, "The machine list is still loading. Try the import again in a moment.");
+            ToastRail.Show(ToastKind.Bad, "The machine list is still loading. Try again in a moment.");
             return;
         }
 
         var names = ArmyShare.FromShareString(text, roster.Select(m => m.Name), out var problem);
         if (names is null)
         {
-            ToastRail.Show(ToastKind.Bad, problem ?? "That is not a shared army.");
+            ToastRail.Show(ToastKind.Bad, problem ?? ArmyShare.NotACode);
             return;
         }
 
@@ -321,7 +321,7 @@ public partial class ArmiesPanel : UserControl
         army.AddRange(picks);
         box.Text = "";
         RedrawArmy();
-        ToastRail.Show(ToastKind.Good, $"Imported {picks.Count} machine(s). Name it and press Save.");
+        ToastRail.Show(ToastKind.Good, Play.ImportedText(picks.Count));
     }
 
     private const string GhostTag = "ghost";
@@ -626,7 +626,7 @@ public partial class ArmiesPanel : UserControl
 
         if (name.Length == 0)
         {
-            ToastRail.Show(ToastKind.Bad, "Name the army before saving it.");
+            ToastRail.Show(ToastKind.Bad, "Name the army first.");
             return;
         }
 
@@ -654,15 +654,14 @@ public partial class ArmiesPanel : UserControl
     {
         if (roster.Count == 0)
         {
-            ToastRail.Show(ToastKind.Bad, "The machine list is still loading. Click the army again in a moment.");
+            ToastRail.Show(ToastKind.Bad, "The machine list is still loading. Try again in a moment.");
             return;
         }
 
         var unknown = saved.Machines.Count(uuid => roster.All(m => m.Uuid != uuid));
         if (unknown > 0)
         {
-            ToastRail.Show(ToastKind.Bad, $"'{saved.Name}' names {unknown} machine(s) this build does not know, "
-                                          + "so it cannot be edited here.");
+            ToastRail.Show(ToastKind.Bad, $"'{saved.Name}' has a machine Strikers does not know, so it cannot be edited.");
             return;
         }
 
@@ -1182,7 +1181,7 @@ public partial class ArmiesPanel : UserControl
         {
             var status = this.FindControl<TextBlock>("ArmiesStatus")!;
             status.Foreground = Palette.SlateDark.Bad.ToBrush();
-            status.Text = "Could not reach netplay. It should sit beside Strikers.exe.";
+            status.Text = "netplay.exe did not answer. It should be in the Strikers folder.";
             status.IsVisible = true;
             return;
         }

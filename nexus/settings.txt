@@ -22,7 +22,7 @@ General
 
 Media
   Header: media/header.png (1300x372)
-  Images: media/gallery-1.png and up (1920x1080), in that order
+  Images: media/gallery-1.png and up, in that order. The odd numbers are in-game shots at 2434x1369 (Steam screenshots of the game trimmed to 16:9, 1 a 6x4 board), and the even numbers are the launcher at 1920x1080, in the order a player meets its screens, eleven in all
   Videos: none
   User submitted images: allowed, approved manually
   User submitted videos: allowed, approved manually
@@ -32,7 +32,7 @@ Files
   File name: Strikers
   Version: the same number as the mod version
   Category: Main Files
-  File: Strikers.zip from build.ps1, run in a fresh clone of the source at the release tag
+  File: Strikers.zip from build.ps1, run in a fresh clone of the source at the commit the release tag names
   File description: the CHANGELOG.md section for this version, then one line, SHA-256 of Strikers.zip: followed by the value in the .sha256 file beside the zip
   Changelog: the same CHANGELOG.md section
 

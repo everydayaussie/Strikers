@@ -2,6 +2,21 @@ namespace Strikers.Netplay;
 
 internal static partial class Program
 {
+    private const string LobbyCommandList =
+        "commands:  preset [<name>]             one command instead of the four below\n" +
+        "           name <NAME>                 your display name, shown on your friend's board\n" +
+        "           challenges                  list loaded challenges with their UUIDs\n" +
+        "           challenge <uuid>            (host only, both PCs load this challenge)\n" +
+        "           board <t0> ... <t63>        (host only, the terrain both PCs play on)\n" +
+        "           rules <victory> <draft>     (host only, -1 on either keeps the stock number)\n" +
+        "           army <uuid> [<uuid> ...]    your machines, in placement order\n" +
+        "           place <x> <y> <dir> [...]   your starting squares, same order as army\n" +
+        "           place auto                  the near placing row, one square per machine\n" +
+        "           roster                      list the machines this game has loaded\n" +
+        "           confirm <code>              the safety code, once both players compared it\n" +
+        "           write                       write both seats, from the Machine Strike menu\n" +
+        "           ready | status | quit";
+
     private static async Task<int> RunLobby(
         Peer peer, string[] args, bool joining, string room, string server, int port, CancellationTokenSource cts)
     {
@@ -11,9 +26,19 @@ internal static partial class Program
         peer.LocalRole = SessionRole.Lobby;
 
         var interactivePlacement = args.Contains("--interactive-placement");
-        var lobby = new Lobby(ArgStr(args, "--build") ?? ReadBuild(probe), isHost: !joining,
-                              localNetplay: OwnVersion(), localProbe: ReadProbeVersion(probe),
-                              localExpires: TestBuild.Read(typeof(Program).Assembly).Expires);
+        var build = ArgStr(args, "--build");
+        if (build is null)
+        {
+            var read = ReadBuild(probe);
+            build = read.Build;
+            if (ProbeRefusedBuild(read.Exit) is { } refused)
+            {
+                Console.WriteLine(refused);
+            }
+        }
+
+        var lobby = new Lobby(build, isHost: !joining,
+                              localNetplay: OwnVersion(), localProbe: ReadProbeVersion(probe));
 
         if (interactivePlacement && !Console.IsOutputRedirected)
         {
@@ -120,18 +145,11 @@ internal static partial class Program
                     break;
 
                 case MsgKind.Confirmed:
-                    Console.WriteLine("  <- they confirmed the safety code");
-
-                    lobby.ConfirmedByPeer(peer.ChannelGeneration);
-                    BindIfBothConfirmed(peer, lobby);
+                    TakeTheirConfirmation(peer, lobby, f);
                     break;
 
                 case MsgKind.Left:
-                    if (!(lobby.LocalReady && lobby.RemoteReady))
-                    {
-                        lobby.ForgetPeer();
-                    }
-
+                    LobbyHeardLeft(lobby);
                     answered = false;
                     break;
 
@@ -148,6 +166,11 @@ internal static partial class Program
                     }
 
                     Console.WriteLine("  <- peer role: lobby");
+                    if (peer.RemoteName is { Length: > 0 } theirName)
+                    {
+                        Console.WriteLine($"  <- their name: {Names.Hex(theirName)}");
+                    }
+
                     break;
 
                 default:
@@ -195,18 +218,7 @@ internal static partial class Program
         if (!Console.IsOutputRedirected)
         {
             Console.WriteLine(
-                "commands:  preset [<name>]             one command instead of the four below\n" +
-                "           name <NAME>                 your display name, shown on your friend's board\n" +
-                "           challenges                  list loaded challenges with their UUIDs\n" +
-                "           challenge <uuid>            (host only, both PCs load this challenge)\n" +
-                "           board <t0> ... <t63>        (host only, the terrain both PCs play on)\n" +
-                "           rules <victory> <draft>     (host only, -1 on either keeps the stock number)\n" +
-                "           army <uuid> [<uuid> ...]    your machines, in placement order\n" +
-                "           place <x> <y> <dir> [...]   your starting squares, same order as army\n" +
-                "           place auto                  the near placing row, one square per machine\n" +
-                "           roster                      list the machines this game has loaded\n" +
-                "           write                       write both seats, from the Machine Strike menu\n" +
-                "           ready | status | quit" +
+                LobbyCommandList +
                 (interactivePlacement
                     ? "\n  (--interactive-placement: write skips the AI seat, you pick squares in game)"
                     : "") +
@@ -250,10 +262,54 @@ internal static partial class Program
         return peer.Halted || lobby.Refusal is not null ? 2 : 0;
     }
 
+    internal static void LobbyHeardLeft(Lobby lobby)
+    {
+        if (!(lobby.LocalReady && lobby.RemoteReady))
+        {
+            lobby.ForgetPeer();
+        }
+    }
+
+    private static bool TakeTheirConfirmation(Peer peer, Lobby lobby, Frame f)
+    {
+        if (!lobby.ConfirmedByPeer(peer.ChannelGeneration, f.SetupDigest, lobby.SetupDigest(_appliedPreset)))
+        {
+            peer.HaltAndTell(Lobby.SetupsDiffer);
+            return false;
+        }
+
+        Console.WriteLine("  <- they confirmed the safety code");
+        BindIfBothConfirmed(peer, lobby);
+        return true;
+    }
+
+    private static bool ConfirmCode(Peer peer, Lobby lobby, string? typed, (string? Code, int Channel) shown)
+    {
+        if (Lobby.ConfirmProblem(typed, shown.Code) is { } notIt)
+        {
+            Console.WriteLine($"  nothing was confirmed: {notIt}");
+            return false;
+        }
+
+        var confirmed = new Frame { Kind = MsgKind.Confirmed, SetupDigest = lobby.SetupDigest(_appliedPreset) };
+        if (!peer.SendIfStillOn(confirmed, shown.Channel))
+        {
+            Console.WriteLine($"  nothing was confirmed: {Lobby.CodeMoved}");
+            return false;
+        }
+
+        lobby.ConfirmedLocally(shown.Channel, shown.Code!);
+        Console.WriteLine("  -> confirmed the safety code");
+        BindIfBothConfirmed(peer, lobby);
+        return true;
+    }
+
     private static void BindIfBothConfirmed(Peer peer, Lobby lobby)
     {
-        if (lobby.BindingChannel(peer.ChannelGeneration) is { } channel && peer.BindToChannel(channel) is { } bound)
+        var (code, current) = peer.CodeAndChannel();
+        if (lobby.BindingChannel(code, current) is { } channel && peer.BindToChannel(channel, code) is { } bound)
         {
+            lobby.BoundOn(channel);
             Console.WriteLine($"  session bound {Convert.ToHexString(bound)}");
         }
     }
@@ -446,7 +502,7 @@ internal static partial class Program
                     break;
 
                 case "write":
-                    LobbyWrite(lobby, probe, yes, interactivePlacement);
+                    LobbyWrite(peer, lobby, probe, yes, interactivePlacement);
                     break;
 
                 case "army" when w.Length >= 2:
@@ -531,7 +587,8 @@ internal static partial class Program
                     _appliedPreset = chosen;
 
                     Console.WriteLine($"  {chosen.Describe()}");
-                    Console.WriteLine($"  open '{chosen.ChallengeName}' in Machine Strike, then run 'write'");
+                    Console.WriteLine($"  open '{chosen.ChallengeName}' in Machine Strike, then confirm the safety code " +
+                                      "and write once both are ready");
 
                     return true;
 
@@ -573,16 +630,7 @@ internal static partial class Program
                     break;
 
                 case "confirm":
-                    if (Lobby.ConfirmProblem(w.Length > 1 ? w[1] : null, peer.Fingerprint) is { } notIt)
-                    {
-                        Console.WriteLine($"  nothing was confirmed: {notIt}");
-                        break;
-                    }
-
-                    lobby.ConfirmedLocally(peer.Fingerprint is not null ? peer.ChannelGeneration : 0);
-                    peer.Send(new Frame { Kind = MsgKind.Confirmed });
-                    Console.WriteLine("  -> confirmed the safety code");
-                    BindIfBothConfirmed(peer, lobby);
+                    ConfirmCode(peer, lobby, w.Length > 1 ? w[1] : null, peer.CodeAndChannel());
                     break;
 
                 default:

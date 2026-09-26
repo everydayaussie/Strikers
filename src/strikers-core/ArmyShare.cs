@@ -24,6 +24,10 @@ public static class ArmyShare
 
     public const int MaxShareLength = 64;
 
+    public const string NotACode = "That is not an army code.";
+
+    public const string Damaged = "That army code is damaged. Copy the whole code again.";
+
     public static IReadOnlyList<string> Canonical(IEnumerable<string> rosterNames)
     {
         return [.. rosterNames.Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal)];
@@ -67,72 +71,72 @@ public static class ArmyShare
         var trimmed = (text ?? "").Trim();
         if (trimmed.Length == 0)
         {
-            problem = "there is nothing to read";
+            problem = "Paste an army code first.";
             return null;
         }
 
         if (trimmed.Length > MaxShareLength)
         {
-            problem = $"that is longer than any shared army; one is at most {MaxShareLength} characters";
+            problem = NotACode;
             return null;
         }
 
         if (!trimmed.StartsWith(SharePrefix, StringComparison.OrdinalIgnoreCase))
         {
-            problem = $"that does not look like a shared army; one starts with {SharePrefix}";
+            problem = NotACode;
             return null;
         }
 
         var body = trimmed[SharePrefix.Length..].ToLowerInvariant();
         if (body.Length <= 5)
         {
-            problem = "that shared army is too short to hold anything";
+            problem = Damaged;
             return null;
         }
 
         var payload = body[..^3];
         if (!string.Equals(body[^3..], ToBase36((int)(Hash(payload) % CheckSpan), 3), StringComparison.Ordinal))
         {
-            problem = "that shared army did not come through whole; copy the whole code again";
+            problem = Damaged;
             return null;
         }
 
         if (!FromBase36(payload[..2], out var head))
         {
-            problem = "that shared army did not come through whole; copy the whole code again";
+            problem = Damaged;
             return null;
         }
 
         var count = (head / FingerprintSpan) + 1;
         if (count < 1 || count > Play.MaxArmy)
         {
-            problem = $"a shared army holds 1 to {Play.MaxArmy} machines, and that one names {count}";
+            problem = $"That army code has {count} machines. The most is {Play.MaxArmy}.";
             return null;
         }
 
         var roster = Canonical(rosterNames);
         if (roster.Count is 0 or > MaxRoster)
         {
-            problem = "the machine list is not ready, so that army cannot be read";
+            problem = "The machine list is still loading. Try again in a moment.";
             return null;
         }
 
         if (head % FingerprintSpan != Fingerprint(roster))
         {
-            problem = "that army was shared from a different machine list, so its machines cannot be named";
+            problem = "That army code comes from a save with different machines.";
             return null;
         }
 
         var digits = BodyLength(count);
         if (payload.Length != 2 + digits)
         {
-            problem = "that shared army did not come through whole; copy the whole code again";
+            problem = Damaged;
             return null;
         }
 
         if (!Unpack(payload[2..], count, out var picks))
         {
-            problem = "that shared army did not come through whole; copy the whole code again";
+            problem = Damaged;
             return null;
         }
 
@@ -141,7 +145,7 @@ public static class ArmyShare
         {
             if (at >= roster.Count)
             {
-                problem = "that army names a machine this save does not have";
+                problem = "That army has a machine this save does not have.";
                 return null;
             }
 

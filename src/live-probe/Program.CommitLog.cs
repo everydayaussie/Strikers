@@ -21,6 +21,115 @@ internal static partial class Program
 
     private const ulong CommitMagic = 0x474E49524D4F4353;
 
+    private const ulong AiControllerVtableRva = 0x190D708;
+    private const int ActivateSlot = 0x10;
+    private const ulong BaseActivateRva = 0xE3F3B0;
+    private const ulong LightSelectedRva = 0xE41790;
+
+    internal static int CursorStubAt()
+    {
+        return CommitStubsAt + CommitSites.Length * CommitStubStride;
+    }
+
+    internal static byte[] AiCursorStub(ulong activate, ulong lightSelected)
+    {
+        var code = new List<byte> { 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0xB8 };
+        code.AddRange(BitConverter.GetBytes(activate));
+        code.AddRange([0xFF, 0xD0, 0x48, 0x8B, 0xCB, 0x33, 0xD2, 0x48, 0xB8]);
+        code.AddRange(BitConverter.GetBytes(lightSelected));
+        code.AddRange([0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3]);
+        return [.. code];
+    }
+
+    internal enum AiActivateState
+    {
+        Stock,
+        Ours,
+        Foreign,
+        Unreadable,
+    }
+
+    internal static AiActivateState AiActivateVerdict(byte[]? have, ulong stock, ulong moduleBase, ulong moduleEnd)
+    {
+        if (have is null || have.Length != 8)
+        {
+            return AiActivateState.Unreadable;
+        }
+
+        var target = BitConverter.ToUInt64(have, 0);
+        if (target == stock)
+        {
+            return AiActivateState.Stock;
+        }
+
+        if (target >= moduleBase && target < moduleEnd)
+        {
+            return AiActivateState.Foreign;
+        }
+
+        return AiActivateState.Ours;
+    }
+
+    private static void PatchAiActivate(ulong page)
+    {
+        var slot = _base + AiControllerVtableRva + ActivateSlot;
+        var stubAt = page + (ulong)CursorStubAt();
+        var have = TryRead(slot, 8, out var read) ? read : null;
+        var verdict = AiActivateVerdict(have, _base + BaseActivateRva, _base, _moduleEnd);
+        if (verdict == AiActivateState.Ours && BitConverter.ToUInt64(have!, 0) == stubAt)
+        {
+            Console.WriteLine("  AI cursor: the activate slot already points at this page's stub");
+            return;
+        }
+
+        if (verdict != AiActivateState.Stock)
+        {
+            Console.Error.WriteLine($"  AI cursor: the AI controller's activate slot 0x{slot:X} does not read the stock " +
+                                    $"0x{_base + BaseActivateRva:X}, so it is left alone and the idle cursor stays");
+            return;
+        }
+
+        if (!WriteCode(slot, BitConverter.GetBytes(stubAt)))
+        {
+            Console.Error.WriteLine("  AI cursor: the activate slot could not be written, so the idle cursor stays");
+            return;
+        }
+
+        Console.WriteLine($"  AI cursor: activate slot 0x{slot:X} -> stub @0x{stubAt:X}, the AI seat starts each turn " +
+                          "with no tile lit");
+    }
+
+    private static int ClearAiActivate()
+    {
+        var slot = _base + AiControllerVtableRva + ActivateSlot;
+        var stock = _base + BaseActivateRva;
+        var have = TryRead(slot, 8, out var read) ? read : null;
+        switch (AiActivateVerdict(have, stock, _base, _moduleEnd))
+        {
+            case AiActivateState.Stock:
+                return 0;
+
+            case AiActivateState.Ours:
+                if (!WriteCode(slot, BitConverter.GetBytes(stock)))
+                {
+                    Console.Error.WriteLine($"  AI cursor: the activate slot 0x{slot:X} could not be put back");
+                    return -1;
+                }
+
+                Console.WriteLine("  AI cursor: the activate slot put back");
+                return 1;
+
+            case AiActivateState.Foreign:
+                Console.Error.WriteLine($"  AI cursor: the activate slot 0x{slot:X} points inside the game and not at " +
+                                        "the stock activate: a different build, left alone");
+                return 0;
+
+            default:
+                Console.Error.WriteLine($"  AI cursor: the activate slot 0x{slot:X} could not be read");
+                return -1;
+        }
+    }
+
     private static readonly (string Name, ulong Rva, byte Kind, byte[] Stock)[] CommitSites =
     [
         ("activate", CommitActivateRva, 1, [0x48, 0x89, 0x5C, 0x24, 0x08]),
@@ -81,11 +190,6 @@ internal static partial class Program
         }
 
         return patched;
-    }
-
-    internal static ulong FindCommitRing()
-    {
-        return FindCommitRing(out _);
     }
 
     internal static ulong FindCommitRing(out bool unreadable)
@@ -254,6 +358,15 @@ internal static partial class Program
             Console.WriteLine($"  {site.Name}: stub {code.Length} bytes @0x{at:X}");
         }
 
+        var cursorAt = page + (ulong)CursorStubAt();
+        var cursor = AiCursorStub(_base + BaseActivateRva, _base + LightSelectedRva);
+        if (!Write(cursorAt, cursor))
+        {
+            return 1;
+        }
+
+        Console.WriteLine($"  AI cursor: stub {cursor.Length} bytes @0x{cursorAt:X}");
+
         var head = new byte[CommitStubsAt];
         BitConverter.GetBytes(CommitMagic).CopyTo(head, CommitMagicSlot);
         BitConverter.GetBytes(ring).CopyTo(head, CommitRingSlot);
@@ -285,6 +398,7 @@ internal static partial class Program
             Console.WriteLine($"  {site.Name} 0x{site.Rva:X}: jmp -> 0x{at:X}");
         }
 
+        PatchAiActivate(page);
         return 0;
     }
 
@@ -292,6 +406,12 @@ internal static partial class Program
     {
         var restored = 0;
         var failed = 0;
+        var cursor = ClearAiActivate();
+        if (cursor < 0)
+        {
+            failed++;
+        }
+
         foreach (var s in CommitSites)
         {
             switch (ClearSite($"{s.Name} 0x{s.Rva:X}", s.Rva, s.Stock, sayStock: true))
@@ -323,6 +443,12 @@ internal static partial class Program
         if (patched == CommitSites.Length)
         {
             Console.WriteLine("  already installed, nothing to do.");
+            var slot = _base + AiControllerVtableRva + ActivateSlot;
+            var have = TryRead(slot, 8, out var read) ? read : null;
+            var cursorPatched = AiActivateVerdict(have, _base + BaseActivateRva, _base, _moduleEnd) == AiActivateState.Ours;
+            Console.WriteLine(cursorPatched
+                ? "  AI cursor: the activate slot is patched"
+                : "  AI cursor: the activate slot is not patched, so the idle cursor stays this run");
             return keep ? HoldCommitRing() : 0;
         }
 

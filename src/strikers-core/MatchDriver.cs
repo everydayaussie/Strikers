@@ -71,7 +71,18 @@ public sealed class MatchDriver
             return true;
         }
 
-        var claim = new EventWaitHandle(false, EventResetMode.ManualReset, _claimName, out var createdNew);
+        EventWaitHandle claim;
+        bool createdNew;
+        try
+        {
+            claim = new EventWaitHandle(false, EventResetMode.ManualReset, _claimName, out createdNew);
+        }
+        catch (Exception e) when (e is UnauthorizedAccessException or WaitHandleCannotBeOpenedException
+                                      or IOException)
+        {
+            return false;
+        }
+
         if (!createdNew)
         {
             claim.Dispose();
@@ -133,6 +144,29 @@ public sealed class MatchDriver
 
     public event Action? LobbyEnded;
 
+    public event Action<int?>? PlayEnded;
+
+    public static string ExitLine(bool play, int? code)
+    {
+        var which = play ? "netplay --play" : "netplay";
+        var how = code is { } c ? $"code {c}" : "code unknown";
+        return $"  {which} exited, {how}";
+    }
+
+    private void Ended(Process p, bool play, int? code)
+    {
+        if (!_running.Contains(p))
+        {
+            return;
+        }
+
+        Say(ExitLine(play, code));
+        if (play)
+        {
+            PlayEnded?.Invoke(code);
+        }
+    }
+
     public static int? FreePort()
     {
         try
@@ -178,9 +212,24 @@ public sealed class MatchDriver
         Say($"> netplay {string.Join(' ', args)}");
 
         var spawnedUnder = Generation;
+        var play = psi.ArgumentList.Contains("--play");
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
         p.OutputDataReceived += (_, e) => OnLine(e.Data, spawnedUnder);
         p.ErrorDataReceived += (_, e) => OnLine(e.Data, spawnedUnder);
+        p.Exited += (_, _) =>
+        {
+            int? code = null;
+            try
+            {
+                p.WaitForExit(2000);
+                code = p.ExitCode;
+            }
+            catch (Exception e) when (e is InvalidOperationException or ObjectDisposedException)
+            {
+            }
+
+            _post(() => Ended(p, play, code));
+        };
 
         try
         {
@@ -205,11 +254,11 @@ public sealed class MatchDriver
         }
     }
 
-    public bool TypeAtLobby(IEnumerable<string> lines, string echo, string absentHeadline)
+    public bool TypeAtLobby(IEnumerable<string> lines, string echo, string headline)
     {
         if (_lobby is null || _lobby.HasExited)
         {
-            Trouble?.Invoke(absentHeadline, "The lobby is not running. Press Stop and start again.");
+            Trouble?.Invoke(headline, "Press Stop and start again.");
             return false;
         }
 
@@ -226,7 +275,8 @@ public sealed class MatchDriver
         }
         catch (Exception e) when (e is IOException or InvalidOperationException or ObjectDisposedException)
         {
-            Trouble?.Invoke("Could not reach the lobby", e.Message);
+            Say($"  the lobby did not answer ({e.GetType().Name})");
+            Trouble?.Invoke(headline, "Press Stop and start again.");
             return false;
         }
     }
@@ -267,7 +317,29 @@ public sealed class MatchDriver
         }
     }
 
+    public bool Restart(Func<bool> ready)
+    {
+        if (!ready())
+        {
+            return false;
+        }
+
+        Stop(releaseClaim: false);
+        return BeginStart();
+    }
+
     public void StopAll()
+    {
+        Stop(releaseClaim: true);
+    }
+
+    public void StopAllAndDropStragglers()
+    {
+        Stop(releaseClaim: true);
+        Generation++;
+    }
+
+    private void Stop(bool releaseClaim)
     {
         var relay = _relay;
         var others = 0;
@@ -296,7 +368,10 @@ public sealed class MatchDriver
         _lobby = null;
         _relay = null;
         _starting = false;
-        ReleaseMatchClaim();
+        if (releaseClaim)
+        {
+            ReleaseMatchClaim();
+        }
     }
 
     private static void KillOne(Process p)
@@ -334,15 +409,24 @@ public sealed class MatchDriver
                 return;
             }
 
-            var shown = Masked(line);
-            _log?.Write(ForTheRecord(shown));
-            Output?.Invoke(shown);
+            _log?.Write(ForTheRecord(Masked(line)));
+            Output?.Invoke(line);
         });
     }
 
     private string Masked(string line)
     {
-        return RoomCode.Length > 0 ? line.Replace(RoomCode, "******") : line;
+        return MaskCode(line, RoomCode);
+    }
+
+    internal static string MaskCode(string line, string code)
+    {
+        if (code.Length == 0)
+        {
+            return line;
+        }
+
+        return Regex.Replace(line, @"(?<![A-Za-z0-9])" + Regex.Escape(code) + @"(?![A-Za-z0-9])", "******");
     }
 
     internal static string ForTheRecord(string line, string? folder = null)
@@ -350,7 +434,12 @@ public sealed class MatchDriver
         var noFingerprint = Regex.Replace(line, @"(fingerprint )[0-9A-Fa-f]{8,64}", "$1********");
         var noBinding = Regex.Replace(noFingerprint, @"(session bound |--binding )[0-9A-Fa-f]{64}", "$1********");
         var noRoom = Regex.Replace(noBinding, @"(--room-id |room id: |room )[A-Za-z0-9]{16,}", "$1******");
-        return WithoutFolder(noRoom, folder ?? AppContext.BaseDirectory);
+        var noCode = Regex.Replace(noRoom, @"(--room |--join |room code: )[A-Z0-9]{4,12}(?![A-Za-z0-9])", "$1******");
+        var noOurName = Regex.Replace(noCode, @"(--name )[A-Za-z0-9]{1,8}(?![A-Za-z0-9])", "$1******");
+        var noTheirName = Regex.Replace(noOurName, @"(<- their name: )(?:[0-9A-Fa-f]{2}){1,8}(?![0-9A-Fa-f])", "$1******");
+        var noJoinedName = Regex.Replace(noTheirName, @"(screen: )[A-Za-z0-9]{1,8}(?= has joined)", "$1******");
+        var noArmyName = Regex.Replace(noJoinedName, @"(--army-name-hex )[0-9A-Fa-f]+", "$1******");
+        return WithoutFolder(noArmyName, folder ?? AppContext.BaseDirectory);
     }
 
     private static string WithoutFolder(string line, string folder)

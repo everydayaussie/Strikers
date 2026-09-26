@@ -396,41 +396,6 @@ internal static partial class Program
         return 0;
     }
 
-    private static int ListUnits(ulong moduleEnd)
-    {
-        var vtable = _base + BoardGameUnitVtableRva;
-        Console.WriteLine($"\n  BoardGameUnit::vftable 0x{vtable:X}, scanning (about 80 s)");
-
-        var hits = new List<ulong>();
-        FindPtr(vtable, moduleEnd, hits);
-
-        var units = hits.Where(h =>
-        {
-            if (!TryRead(h, 0x88, out var b))
-            {
-                return false;
-            }
-
-            for (var off = 0x50; off <= 0x60; off += 4)
-            {
-                var v = BitConverter.ToInt32(b, off);
-                if (v is < 0 or > 64)
-                {
-                    return false;
-                }
-            }
-            return true;
-        }).ToList();
-
-        Console.WriteLine($"\n  {units.Count} BoardGameUnit resource(s) (of {hits.Count} raw hits):");
-        foreach (var u in units)
-        {
-            PrintUnitStats("  ", u);
-        }
-
-        return 0;
-    }
-
     private const ulong BoardGameDraftVtableRva = 0x190E400;
 
     private static bool IsDraft(ulong p)
@@ -664,86 +629,6 @@ internal static partial class Program
             ReportDraft(d);
         }
 
-        return 0;
-    }
-
-    private static int SetActed(string[] args, int at)
-    {
-        if (at + 1 >= args.Length)
-        {
-            Console.Error.WriteLine("--set-acted <x> <y> [--burst] [--yes]   (game coordinates)");
-            return 1;
-        }
-
-        var x = (int)ParseAddr(args, at);
-        var y = (int)ParseAddr(args, at + 1);
-        if (!int.TryParse(args[at], out x) || !int.TryParse(args[at + 1], out y))
-        {
-            return 1;
-        }
-
-        var chain = Walk(report: false);
-        if (chain.Logic == 0)
-        {
-            Console.Error.WriteLine("No match is live.");
-            return 2;
-        }
-
-        var count = (int)ReadU32(chain.Logic + 0x38);
-        var array = ReadPtr(chain.Logic + 0x40);
-        ulong unit = 0;
-        for (var i = 0; i < count && i < 64; i++)
-        {
-            var u = ReadPtr(array + (ulong)(i * 8));
-            if (!Sane(u) || !TryReadByte(u + 0x38, out var packed))
-            {
-                continue;
-            }
-
-            if (Nibble(packed) == x && Nibble(packed >> 4) == y)
-            {
-                unit = u;
-                break;
-            }
-        }
-
-        if (unit == 0)
-        {
-            Console.Error.WriteLine($"  no piece on ({x},{y}).");
-            return 2;
-        }
-        if (!TryReadByte(unit + 0x3B, out var b))
-        {
-            Console.Error.WriteLine("  read failed.");
-            return 2;
-        }
-
-        var burst = args.Contains("--burst");
-        var after = burst
-            ? (byte)((((b + 0x10) ^ b) & 0x30 ^ b) | 0x40)
-            : (byte)(((((b + 4) ^ b) & 0x0c) ^ b) & 0xbf);
-
-        Console.WriteLine($"\n  piece ({x},{y}) @0x{unit:X}");
-        Console.WriteLine($"    +0x3B  0x{b:X2} -> 0x{after:X2}   " +
-                          $"(facing {b & 3}, action count {(b >> 2) & 3} -> {(after >> 2) & 3})");
-
-        if (!args.Contains("--yes"))
-        {
-            Console.WriteLine("  dry run, pass --yes to write.");
-            return 0;
-        }
-
-        if (!Write(unit + 0x3B, [after]))
-        {
-            return 1;
-        }
-
-        if (TryReadByte(unit + 0x68, out var f))
-        {
-            Write(unit + 0x68, [(byte)(burst ? f & 0xFE : f | 1)]);
-        }
-
-        Console.WriteLine("    written.");
         return 0;
     }
 

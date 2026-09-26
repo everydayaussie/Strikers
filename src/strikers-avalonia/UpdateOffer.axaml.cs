@@ -33,14 +33,14 @@ public partial class UpdateOffer : Window
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = Release.PageUrl(UpdateCheck.ModId()),
+                FileName = UpdateCheck.Page(),
                 UseShellExecute = true,
             });
             Close();
         }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception or IOException)
         {
-            Tell($"Could not open the page. Go to {Release.PageUrl(UpdateCheck.ModId())} in your browser.");
+            Tell($"Could not open the page. Go to {UpdateCheck.Page()} in your browser.");
         }
     }
 
