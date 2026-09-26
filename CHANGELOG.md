@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0
+## 1.1.0, 2026-09-26
 
 Both players need 1.1.0. It cannot play against 1.0.0.
 
